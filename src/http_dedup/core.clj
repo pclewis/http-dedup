@@ -3,13 +3,19 @@
   (:import [java.net InetAddress InetSocketAddress Socket]
            [java.nio ByteBuffer]
            [java.nio.channels ServerSocketChannel SocketChannel Selector SelectionKey]
-           [java.nio.charset Charset CharsetDecoder]))
+           [java.nio.charset Charset CharsetDecoder])
+  (:require [clojure.core.async :as async :refer [go go-loop <! >!]]))
 
 (def ASCII (Charset/forName "US-ASCII"))
 
+(defn test-bits
+  "Returns true if all bits in y are set in x."
+  [x y] (= y (bit-and x y)))
+
 (defn bit-seq
-  ([] (iterate #(bit-shift-left % 1) 1))
-  ([n] (keep #(when (= % (bit-and n %)) %) (take-while #(<= % n) (bit-seq)))))
+  "Return lazy seq of bit values (powers of 2) that are set in n (default -1, i.e. all bits set)."
+  ([] (take-while (complement zero?) (iterate #(bit-shift-left % 1) 1)))
+  ([n] (filter #(test-bits n %) (take-while #(or (< n 0) (<= % n)) (bit-seq)))))
 
 (defn pre-swap!
   "swap! but return the value that was swapped out instead of the value that was swapped in."
@@ -18,6 +24,8 @@
     (if (compare-and-set! atom old-value (apply f old-value args))
       old-value
       (recur @atom))))
+
+(defn bytebuf-to-str [bb] (-> ASCII .newDecoder (.decode bb) .toString))
 
 (declare new-server-connection)
 (defn make-connection [selector port write-buffer ifr flight-key]
@@ -188,8 +196,7 @@
     (try
       (.configureBlocking socket false)
       (.bind (.socket socket) (InetSocketAddress. (InetAddress/getByName "0.0.0.0") listen-port))
-      (.register socket selector (SelectionKey/OP_ACCEPT) {:connect-port connect-port
-                                                           :in-flight-requests (atom {})})
+      (.register socket selector (SelectionKey/OP_ACCEPT))
       selector
       (catch Throwable t
         (.close socket)
@@ -253,3 +260,175 @@
   (shutdown server breaker)
 
   )
+
+;; Channels:
+;; - connection read channel:
+;; - connection write channel:
+;; - carrier request:
+;;     [:request req write-channel] if there's a flight in progress, write-channel will be added to it
+;;                                  otherwise, a new flight will be started
+;;     [:depart req] flight is leaving, passenger channel needs to be closed
+;;
+
+(defn request-buffer [buffer-chan]
+  (let [r (async/chan)]
+    (async/>!! buffer-chan [:request r])
+    (async/<!! r)))
+
+(defn start-selector-thread [selector]
+  (let [control-chan (async/chan 1) ; need message waiting before we're woken up
+        selector-chan (async/chan)
+        buffer-chan (buffer-master)]
+    (go-loop []
+             (if-let [msg (<! selector-chan)]
+               (do (>! control-chan msg)
+                   (.wakeup selector)
+                   (recur))
+               (do (async/close! control-chan)
+                   (.wakeup selector))))
+    (async/thread
+     (loop [pending-writes {}]
+       (when (< 0 (.select selector))
+         (let [keys (.selectedKeys selector)]
+           (doseq [key keys]
+             (doseq [op (bit-seq (.readyOps key))]
+               (case op
+                 SelectionKey/OP_READ
+                 (let [buffer (request-buffer buffer-chan)
+                       n-read (try (.read (.channel key) buffer)
+                                   (catch java.io.IOException _ -1))
+                       [rc wc] (.attachment key)]
+                   (assert (not= n-read 0))
+                   (if (< n-read 0) ; connection closed
+                     (do (async/close! rc)
+                         (async/close! wc)
+                         (async/>!! buffer-chan [:release buffer]))
+                     (async/>!! rc (.flip buffer))))
+
+                 SelectionKey/OP_WRITE
+                 (when-let [buffer (get pending-writes key)]
+                   (.write (.channel key) buffer))
+
+                 SelectionKey/OP_ACCEPT
+                 (let [new-channel (doto (.accept (.channel key))
+                                     (.configureBlocking false))
+                       rc (async/chan) wc (async/chan)]
+                   (.register new-channel selector SelectionKey/OP_READ [rc wc])
+                   (handle-incoming rc wc)
+                   (println "Accepted connection from " (.getRemoteSocketAddress (.socket new-channel))))
+
+                 SelectionKey/OP_CONNECT
+                 (when (.finishConnect (.channel key))
+                   (println "Connection established")
+                   (.interestOps key SelectionKey/OP_READ)))))))
+       (when
+        (async/alt!!
+         control-chan ([msg] (when msg))
+         :default true)
+        (recur {})))
+
+     (println "Selector thread exiting..."))
+
+    selector-chan))
+
+(comment
+  (def server (make-sever 8081 8080))
+
+  (def sc (start-selector-thread server))
+
+  (async/close! sc)
+
+
+  )
+
+
+
+(defn create-socket [port]
+  (doto (SocketChannel/open)
+    (.configureBlocking false)
+    (.connect (InetSocketAddress. (InetAddress/getByName nil) port))))
+
+(declare start-flight)
+(defn start-atc [selector-chan config]
+  (let [atc-chan (async/chan)]
+    (go-loop
+     [flights {}]
+     (let [[type req wc :as msg] (<! atc-chan)]
+       (when msg
+         (recur
+          (case type
+            :request (if-let [flight (get flights req)]
+                       (do (>! flight wc)
+                           flights)
+                       (assoc flights req (start-flight req atc-chan)))
+            :depart (let [flight (get flights req)]
+                      (async/close! flight)
+                      (dissoc flights req))
+            :connect (let [socket (create-socket (:connect-port config))
+                           [_ rc wc] msg]
+                       (>! selector-chan [:register-connection rc wc])
+                       flights))))))
+    atc-chan))
+
+(defn start-request [atc req]
+  (go
+   (let [read-channel (async/chan)
+         write-channel (async/chan)]
+     (>! atc [:connect read-channel write-channel])
+     (>! write-channel req) ; will block until connection is opened
+     [read-channel write-channel])))
+
+
+
+(defn start-flight [req atc]
+  (let [jetway (async/chan)]
+    (go
+     (let [boarding (async/reduce conj [] jetway) ; start accepting passengers first, so atc doesn't block
+           [read-channel write-channel] (<! (start-request atc req))
+           first-block (<! read-channel)          ; wait for first block
+           _ (>! atc [:depart req])               ; let atc know we're leaving so they close the jetway
+           passengers (<! boarding)]              ; find out who boarded
+       (loop [block first-block]
+         (when block
+           (doseq [p passengers]
+             (>! p (.duplicate block)))
+           (recur (<! write-channel))))
+       (doseq [p passengers]
+         (async/close! p)))
+     jetway)))
+
+(defn read-request [read-channel]
+  (go-loop [s nil]
+           (when-let [buf (<! read-channel)]
+             (let [ns (str s (bytebuf-to-str buf))
+                   i (.indexOf ns "\r\n\r\n")]
+               (if (>= i 0)
+                 (subs ns 0 i)
+                 (recur ns))))))
+
+(defn handle-incoming [read-channel write-channel]
+  (go
+   (let [request (<! (read-request read-channel))]
+     (when request
+       (>! air-traffic-control [:request request write-channel])))))
+
+(def BUFFER_SIZE 32768)
+(def MAX_BUFFERS 1024)
+
+(first (repeatedly 5 #(identity 0) ))
+; Implemented as a channel so that we can wait for a buffer to become available without blocking.
+; Also cause it's neat.
+(defn buffer-master []
+  (let [ch (async/chan)]
+    (go-loop [pool (repeatedly MAX_BUFFERS #(ByteBuffer/allocate BUFFER_SIZE))
+              pending-requests []]
+             (when-let [[type arg :as msg] (<! ch)]
+               (case type
+                 :request (if (not-empty pool)
+                            (do (>! arg (first pool))
+                                (recur (rest pool) pending-requests))
+                            (recur pool (conj pending-requests arg)))
+                 :return (if (not-empty pending-requests)
+                           (do (>! (peek pending-requests) arg)
+                               (recur pool (pop pending-requests)))
+                           (recur (cons arg pool) pending-requests)))))))
