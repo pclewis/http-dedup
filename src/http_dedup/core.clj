@@ -25,9 +25,10 @@
         channel (doto (SocketChannel/open)
                   (.configureBlocking false)
                   (.connect (InetSocketAddress. (InetAddress/getByName nil) port)))
-        sk (.register channel selector SelectionKey/OP_CONNECT)]
-    (.attach sk (assoc conn :sk sk))
-    conn))
+        sk (.register channel selector SelectionKey/OP_CONNECT)
+        nc (assoc conn :sk sk)]
+    (.attach sk nc)
+    nc))
 
 (defn update-buffer [buffer new-str]
   (.clear buffer)
@@ -66,7 +67,7 @@
               (.attach sk (assoc connection
                             :on-loop flight-loop-handler
                             :on-read nil
-                            :on-close end-flight
+                            :on-close nil
                             :passengers [c]))))
           (println "Joined a flight!"))))))
 
@@ -169,13 +170,13 @@
                (deref (:want-close connection)))
       (close-connection connection))))
 
-
 (defmethod handle-event (SelectionKey/OP_READ) [sk]
   (let [attachment (.attachment sk)
         buffer (:read-buffer attachment)
         start  (.limit buffer)
         channel (.channel sk)
-        n-read (.read channel buffer)]
+        n-read (try (.read channel buffer)
+                    (catch java.io.IOException e -1))]
     (if (< n-read 0)
      (close-connection attachment)
       (when-let [on-read (:on-read attachment)]
@@ -212,9 +213,10 @@
             (doseq [k keys] (handler k))
             (.clear keys))
           (doseq [k (.keys selector)]
+           (when-let [lh (:on-loop (.attachment k))]
+             (lh k (.attachment k))))
+          (doseq [k (.keys selector)]
             (when (.isValid k)
-              (when-let [lh (:on-loop (.attachment k))]
-                (lh k (.attachment k)))
               (when-let [buffer (:write-buffer (.attachment k))]
                 (if (< (.position buffer) (.limit buffer))
                   (.interestOps k (bit-or (.interestOps k) SelectionKey/OP_WRITE))
