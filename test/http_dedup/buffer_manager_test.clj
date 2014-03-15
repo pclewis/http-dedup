@@ -16,25 +16,67 @@
 
 (deftest buffer-manager-test
   (testing "Acquiring a buffer"
-    (let [b1 (peek!! (request!! *bufman*) 100)]
+    (let [b1 (<!! (request *bufman*))]
       (is (instance? ByteBuffer b1))
-      (return!! *bufman* b1)))
+      (return *bufman* b1)))
+
   (testing "Waiting for a buffer"
-    (let [b1 (peek!! (request!! *bufman*))
-          b2 (peek!! (request!! *bufman*))
-          b3c (request!! *bufman*)]
-      (is (nil? (peek!! b3c)))
-      (return!! *bufman* b1)
-      (is (= b1 (peek!! b3c)))
-      (return!! *bufman* b1)
-      (return!! *bufman* b2)))
+    (let [b1 (<!! (request *bufman*))
+          b2 (<!! (request *bufman*))
+          b3c (request *bufman*)]
+      (is (nil? (peek!! b3c 100)))
+      (return *bufman* b1)
+      (is (identical? b1 (peek!! b3c 100)))
+      (return *bufman* b1)
+      (return *bufman* b2)))
+
   (testing "Copying a buffer"
-    (let [[b1 b2] (repeatedly #(peek!! (request!! *bufman*)))
-          b1-1 (copy!! *bufman* b1)]
-      (.write b1 (.getBytes "test"))
+    (let [[b1 b2] (repeatedly #(<!! (request *bufman*)))
+          b1-1 (<!! (copy *bufman* b1))]
+      (is (not (identical? b1 b1-1)))
+      (.put b1 (.getBytes "test"))
+      (.flip b1)
       (.limit b1-1 (.limit b1))
       (is (= b1 b1-1))
-      (doseq [b [b1 b2 b1-1]] (return!! *bufman* b)))))
+      (doseq [b [b1 b2 b1-1]] (return *bufman* b))))
+
+  (testing "Buffer returned after copies returned"
+    (let [[b1 b2](repeatedly #(<!! (request *bufman*)))
+          b1-1 (<!! (copy *bufman* b1))
+          b3c (request *bufman*)]
+      (return *bufman* b1)
+      (is (nil? (peek!! b3c 10)))
+      (return *bufman* b1-1)
+      (is (identical? b1 (<!! b3c)))
+      (doseq [b [b1 b2]] (return *bufman* b))))
+
+  (testing "Copying a copy"
+    (let [[b1 b2] (repeatedly #(<!! (request *bufman*)))
+          b1-1 (<!! (copy *bufman* b1))
+          b1-1-1 (<!! (copy *bufman* b1))
+          b3c (request *bufman*)]
+      (.put b1 (.getBytes "test"))
+      (.flip b1)
+      (.limit b1-1-1 (.limit b1))
+      (is (= b1 b1-1-1))
+      (return *bufman* b1)
+      (is (nil? (peek!! b3c 10)))
+      (return *bufman* b1-1)
+      (is (nil? (peek!! b3c 10)))
+      (return *bufman* b1-1-1)
+      (is (identical? b1 (<!! b3c)))
+      (doseq [b [b1 b2]] (return *bufman* b))))
+
+  (testing "Buffer cleanup"
+    (let [[b1 b2] (repeatedly #(<!! (request *bufman*)))
+          b3c (request *bufman*)]
+      (.put b1 (.getBytes "test"))
+      (.flip b1)
+      (return *bufman* b1)
+      (is (identical? b1 (<!! b3c)))
+      (is (= (.capacity b1) (.limit b1)))
+      (is (= 0 (.position b1)))
+      (doseq [b [b1 b2]] (return *bufman* b)))))
 
 
 (comment
