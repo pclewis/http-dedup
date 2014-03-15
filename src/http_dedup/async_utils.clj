@@ -50,35 +50,44 @@
                         (println "Loop dying"))))
            ch#))
        ~@(apply concat (for [f methods :let [fname (first f)
+                                             fname! (symbol (str fname "!"))
+                                             fname!! (symbol (str fname "!!"))
                                              args (second f)]]
                          (list
                           (if (= 'out (first args))
-                            `(defmacro ~(symbol (str fname "!")) ~(into [name] (rest args))
+                            `(defmacro ~fname! ~(into [name] (rest args))
                                (let [~(first args) (async/chan)]
                                  (>! ~name ~(into [(keyword fname)] args))
                                  ~(first args)))
-                            `(defmacro ~(symbol (str fname "!")) ~(into [name] args)
+                            `(defmacro ~fname! ~(into [name] args)
                                (>! ~name ~(into [(keyword fname)] args))))
 
                           (if (= 'out (first args))
-                            `(defn ~(symbol (str fname "!!")) ~(into [name] (rest args))
+                            `(defn ~fname!! ~(into [name] (rest args))
                                (let [~(first args) (async/chan)]
                                  (async/>!! ~name ~(into [(keyword fname)] args))
                                  ~(first args)))
-                            `(defn ~(symbol (str fname "!!")) ~(into [name] args)
-                               (async/>!! ~name ~(into [(keyword fname)] args))))))))))
+                            `(defn ~fname!! ~(into [name] args)
+                               (async/>!! ~name ~(into [(keyword fname)] args))))
+
+                          (if (= 'out (first args))
+                            `(defn ~fname ~(into [name] (rest args))
+                               (let [~(first args) (async/chan)]
+                                 (go (>! ~name ~(into [(keyword fname)] args)))
+                                 ~(first args)))
+                            `(defn ~fname ~(into [name] args)
+                               (go (>! ~name ~(into [(keyword fname)] args)))))))))))
 
 
 ;(remove-ns 'http-dedup.async-utils)
 
 (defmacro peek!
-  ([chan] (peek! chan 0))
+  ([chan] `(peek! ~chan 0))
   ([chan timeout]
      `(async/alt! ~chan ([v#] v#)
                   ~(if (= timeout 0) `:default `(async/timeout ~timeout)) nil)))
 
-;(macroexpand-1 '(peek! q))
-
 (defn peek!!
-  [chan]
-  (async/alt!! chan ([v] v) :default nil))
+  ([chan] (peek!! chan 0))
+  ([chan timeout]
+     (async/alt!! chan ([v] v) (async/timeout timeout) nil)))

@@ -3,7 +3,7 @@
   (:require [http-dedup.async-utils :refer [defasync]]
             [clojure.core.async :as async :refer [<! >!]]))
 
-;(clojure.pprint/pprint (clojure.walk/macroexpand-all (quote)))
+;(clojure.pprint/pprint (macroexpand (quote)))
 (defasync buffer-manager
   [pool id-map parent-map ref-map pending-requests]
   ([max-buffers buffer-size]
@@ -49,12 +49,14 @@
             (println "Returning " {:buf buf :buf-id id :src src :src-id src-id})
             (when-let [refs (disj (ref-map src-id) id)]
               (if (empty? refs)
-                (if (empty? pending-requests)
-                  {:pool (cons src pool)
-                   :ref-map (dissoc ref-map src-id)}
-                  (do (>! (peek pending-requests) src)
-                      {:ref-map (assoc ref-map src-id #{src-id})
-                       :pending-requests (pop pending-requests)}))
+                (do
+                  (.clear src)
+                  (if (empty? pending-requests)
+                    {:pool (cons src pool)
+                     :ref-map (dissoc ref-map src-id)}
+                    (do (>! (peek pending-requests) src)
+                        {:ref-map (assoc ref-map src-id #{src-id})
+                         :pending-requests (pop pending-requests)})))
                 {:ref-map (assoc ref-map src-id refs)})))))
 
 
