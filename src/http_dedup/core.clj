@@ -4,7 +4,8 @@
            [java.nio ByteBuffer]
            [java.nio.channels ServerSocketChannel SocketChannel Selector SelectionKey]
            [java.nio.charset Charset CharsetDecoder])
-  (:require [clojure.core.async :as async :refer [go go-loop <! >!]]))
+  (:require [clojure.core.async :as async :refer [go go-loop <! >!]]
+            [http-dedup.buffer-manager :as bufman]))
 
 (def ASCII (Charset/forName "US-ASCII"))
 
@@ -278,7 +279,7 @@
 (defn start-selector-thread [selector]
   (let [control-chan (async/chan 1) ; need message waiting before we're woken up
         selector-chan (async/chan)
-        buffer-chan (buffer-master)]
+        bufman (bufman/buffer-manager)]
     (go-loop []
              (if-let [msg (<! selector-chan)]
                (do (>! control-chan msg)
@@ -411,24 +412,3 @@
    (let [request (<! (read-request read-channel))]
      (when request
        (>! air-traffic-control [:request request write-channel])))))
-
-(def BUFFER_SIZE 32768)
-(def MAX_BUFFERS 1024)
-
-(first (repeatedly 5 #(identity 0) ))
-; Implemented as a channel so that we can wait for a buffer to become available without blocking.
-; Also cause it's neat.
-(defn buffer-master []
-  (let [ch (async/chan)]
-    (go-loop [pool (repeatedly MAX_BUFFERS #(ByteBuffer/allocate BUFFER_SIZE))
-              pending-requests []]
-             (when-let [[type arg :as msg] (<! ch)]
-               (case type
-                 :request (if (not-empty pool)
-                            (do (>! arg (first pool))
-                                (recur (rest pool) pending-requests))
-                            (recur pool (conj pending-requests arg)))
-                 :return (if (not-empty pending-requests)
-                           (do (>! (peek pending-requests) arg)
-                               (recur pool (pop pending-requests)))
-                           (recur (cons arg pool) pending-requests)))))))
