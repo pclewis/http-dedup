@@ -29,7 +29,7 @@
     `(do
        (defn ~name ~(first ctor)
          (let [ch# (async/chan)]
-           (go-loop [{:keys ~fields :as ~state_} ~@(rest ctor)]
+           (go-loop [{:keys ~fields :as ~state_} (merge {:this ch#} ~@(rest ctor))]
                     (let [~@(apply concat (for [f local-fns]
                                             (list (second f) f)))]
                       (if-let [~msg_ (<! ch#)]
@@ -91,3 +91,27 @@
   ([chan] (peek!! chan 0))
   ([chan timeout]
      (async/alt!! chan ([v] v) (async/timeout timeout) nil)))
+
+
+(defn get!!
+  ([chan] (get!! chan false 0))
+  ([chan none] (get!! chan none 0))
+  ([chan none timeout]
+     (if (= 0 timeout)
+       (async/alt!! chan ([v] v) :default none)
+       (async/alt!! chan ([v] v) (async/timeout timeout) none))))
+
+(defmacro go-loop-<!
+  "A loop that will take items from ch and bind them to binding.
+   Will loop until the channel is closed."
+  [ch binding & body]
+  `(go-loop []
+            (when-let [~binding (<! ~ch)]
+              ~@body
+              (recur))))
+
+(defn drain
+  ([ch] (drain ch identity))
+  ([ch f & args]
+     (let [fa (apply partial f args)]
+       (go-loop-<! ch msg (fa msg)))))
