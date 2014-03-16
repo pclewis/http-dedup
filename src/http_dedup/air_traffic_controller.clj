@@ -6,7 +6,7 @@
 ; how to take an analogy too far
 
 (defasync air-traffic-controller [flights sockman host port this]
-  ([sockman host port] {:sockman sockman :host host :port port :flights {}})
+  (create [sockman host port] {:sockman sockman :host host :port port :flights {}})
 
   (fn dump-bags [ps [p bs]]
     (doseq [b bs]
@@ -27,7 +27,7 @@
          (loop [block first-block]
            (when block
              ; look at this. LOOK AT THIS.
-             (doall (map >! passengers (iterate #(sockman/copy-buffer sockman %) block)))
+             (dorun (map >! passengers (iterate #(sockman/copy-buffer sockman %) block)))
              (recur (<! write-channel))))
          (doseq [p passengers]
            (async/close! p)))

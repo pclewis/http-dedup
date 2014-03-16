@@ -1,28 +1,32 @@
 (ns http-dedup.select
   (:import [java.nio.channels Selector SelectionKey])
   (:require [clojure.core.async :as async :refer [go go-loop >! <!]]
-            [http-dedup.async-utils :refer :all]
-            [http-dedup.util :refer [bit-seq]])
+            [http-dedup.async-utils :refer [defasync thread get!!]]
+            [http-dedup.util :refer [bit-seq]]
+            [taoensso.timbre :as log])
   (:refer-clojure :exclude [read write]))
 
 (defn selector-thread [selector]
   (let [subch (async/chan 1)] ; buffer 1 msg so someone can write and then wake us up
-    (async/thread
+    (thread
      (loop []
        (when (< 0 (.select selector))
          (let [keys (.selectedKeys selector)]
+           (log/trace "Selected some keys" keys)
            (doseq [key keys :let [ops (.readyOps key)
                                   opseq (bit-seq ops)
                                   receivers (.attachment key)]]
              (.interestOps key (bit-and-not (.interestOps key) ops))
-             (.attachment key (apply dissoc (.attachment key) opseq))
+             (.attach key (apply dissoc (.attachment key) opseq))
              (doseq [op opseq
                      r (get receivers op)]
+               (log/trace "Key" key "received op" op)
                (go (>! r key))))
            (.clear keys)))
 
        (let [closed?
              (loop [msg (get!! subch)] ; false if empty, nil if closed
+               (log/debug "Got message: " msg)
                (if msg
                  (let [[op ch rch] msg
                        sk (.keyFor ch selector)]
@@ -33,17 +37,22 @@
                    (recur (get!! subch)))
                  (nil? msg)))]
          (when-not closed?
-           (recur)))))
+           (recur))))
+     (log/info "Select thread exiting"))
     subch))
 
 (defasync select [subch selector]
-  ([] (let [selector (Selector/open)]
-        {:selector selector
-         :subch (selector-thread selector)}))
+  (create [] (let [selector (Selector/open)]
+               {:selector selector
+                :subch (selector-thread selector)}))
 
-  (fn sub [out socket op]
-    (>! subch [op socket out])
-    (.wakeup selector))
+  (destroy (async/close! subch)
+           (.wakeup selector))
+
+  (fn sub [op socket out]
+    (go
+     (>! subch [op socket out])
+     (.wakeup selector)))
 
   (read [out socket] (sub SelectionKey/OP_READ socket out))
   (write [out socket] (sub SelectionKey/OP_WRITE socket out))
