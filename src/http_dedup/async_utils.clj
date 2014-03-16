@@ -1,12 +1,15 @@
 (ns http-dedup.async-utils
-  (:require [clojure.core.async :as async :refer [go go-loop <! >!]]))
+  (:require [clojure.core.async :as async :refer [go go-loop <! >!]]
+            [taoensso.timbre :as log]))
 
 (defmacro defasync
   "Convert a form like:
 
-   (defasync name [field1 field2] ([constructor args] constructor)
-       (fn private-fn [args] (impl))
-       (public-fn [args] (impl)))
+   (defasync name [field1 field2]
+       (create [constructor args] (impl))?
+       (destroy (impl))?
+       (fn private-fn [args] (impl))+
+       (public-fn [args] (impl))+)
 
    Into a function that returns a channel on which names of and arguments
    to public functions can be written to invoke them.
@@ -21,22 +24,39 @@
 
    Note private-fns are declared in order because core.async does not
    properly support letfn. i.e., private fns can only call other private-fns
-   that are declared before themselves."
-  [name fields ctor & fns]
-  (let [{local-fns true, methods false} (group-by #(= (first %) 'fn) fns)
+   that are declared before themselves.
+
+   The specified fields are contained in a map initialized by the constructor.
+   If any public fn returns a map, the state will be updated by merging it.
+   If there is a field called 'this', it will be initialized to the channel
+   returned by the constructor, and can be used to call public-fns."
+  [name fields & fns]
+  (let [[[ctor] fns] (split-with #(= 'create (first %)) fns)
+        [[dtor] fns] (split-with #(= 'destroy (first %)) fns)
+        [local-fns methods] (split-with #(= 'fn (first %)) fns)
         msg_ (gensym "msg")
         state_ (gensym "state")]
     `(do
-       (defn ~name ~(first ctor)
+       ~@(for [f methods :let [fname (first f)
+                               args (second f)]]
+           (if (= 'out (first args))
+             `(defn ~fname ~(into [name] (rest args))
+                (let [~(first args) (async/chan)]
+                  (go (>! ~name ~(into [(keyword fname)] args)))
+                  ~(first args)))
+             `(defn ~fname ~(into [name] args)
+                (go (>! ~name ~(into [(keyword fname)] args))))))
+
+       (defn ~name ~(if ctor (second ctor) `[])
          (let [ch# (async/chan)]
-           (go-loop [{:keys ~fields :as ~state_} (merge {:this ch#} ~@(rest ctor))]
+           (go-loop [{:keys ~fields :as ~state_} (merge {:this ch#} ~@(when ctor (drop 2 ctor)))]
                     (let [~@(apply concat (for [f local-fns]
                                             (list (second f) f)))]
                       (if-let [~msg_ (<! ch#)]
-                        (do (println "Got message: " ~msg_)
+                        (do
+                          (log/trace ~(str name) "received message:" ~msg_)
                           (recur
-                           (merge ~state_
-                                  (try
+                           (let [res# (try
                                     (condp = (first ~msg_)
                                       ~@(apply concat (for [f methods]
                                                         (list (keyword (first f))
@@ -45,38 +65,13 @@
                                     (catch Throwable t
                                       (println "Exception in message handler:")
                                       (clojure.stacktrace/print-cause-trace t)
-                                      {}) ))))
-
-                        (println "Loop dying"))))
-           ch#))
-       ~@(apply concat (for [f methods :let [fname (first f)
-                                             fname! (symbol (str fname "!"))
-                                             fname!! (symbol (str fname "!!"))
-                                             args (second f)]]
-                         (list
-                          (if (= 'out (first args))
-                            `(defmacro ~fname! ~(into [name] (rest args))
-                               (let [~(first args) (async/chan)]
-                                 (>! ~name ~(into [(keyword fname)] args))
-                                 ~(first args)))
-                            `(defmacro ~fname! ~(into [name] args)
-                               (>! ~name ~(into [(keyword fname)] args))))
-
-                          (if (= 'out (first args))
-                            `(defn ~fname!! ~(into [name] (rest args))
-                               (let [~(first args) (async/chan)]
-                                 (async/>!! ~name ~(into [(keyword fname)] args))
-                                 ~(first args)))
-                            `(defn ~fname!! ~(into [name] args)
-                               (async/>!! ~name ~(into [(keyword fname)] args))))
-
-                          (if (= 'out (first args))
-                            `(defn ~fname ~(into [name] (rest args))
-                               (let [~(first args) (async/chan)]
-                                 (go (>! ~name ~(into [(keyword fname)] args)))
-                                 ~(first args)))
-                            `(defn ~fname ~(into [name] args)
-                               (go (>! ~name ~(into [(keyword fname)] args)))))))))))
+                                      nil) )]
+                             (if (map? res#)
+                               (merge ~state_ res#)
+                               ~state_))))
+                        (do (log/trace ~(str name) "closed.")
+                            ~@(when dtor (rest dtor))))))
+           ch#)))))
 
 
 ;(remove-ns 'http-dedup.async-utils)
@@ -115,3 +110,11 @@
   ([ch f & args]
      (let [fa (apply partial f args)]
        (go-loop-<! ch msg (fa msg)))))
+
+
+(defmacro thread [& body]
+  `(async/thread
+    (try
+      ~@body
+      (catch Throwable t#
+        (log/error t# "Thread exiting with exception")))))

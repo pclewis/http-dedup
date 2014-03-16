@@ -8,8 +8,8 @@
             [clojure.core.async :as async :refer [go go-loop >! <!]]))
 
 (defasync socket-manager [select bufman]
-  ([] ({:select (select/select)
-        :bufman (bufman/buffer-manager 16 32767)}))
+  (create [] {:select (select/select)
+              :bufman (bufman/buffer-manager 16 32767)})
 
   (fn writer [socket]
     (let [inch (async/chan)]
