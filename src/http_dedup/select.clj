@@ -32,13 +32,16 @@
                        sk (.keyFor ch selector)]
                    (if sk
                      (do (.interestOps sk (bit-or (.interestOps sk) op))
-                         (.attachment sk (merge-with concat (.attachment sk) {op [rch]})))
+                         (.attach sk (merge-with concat (.attachment sk) {op [rch]})))
                      (.register ch selector op {op [rch]}))
                    (recur (get!! subch)))
                  (nil? msg)))]
          (when-not closed?
            (recur))))
-     (log/info "Select thread exiting"))
+     (log/info "Select thread exiting")
+     (doseq [k (.keys selector)]
+       (.cancel k)
+       (.close (.channel k))))
     subch))
 
 (defasync select [subch selector]
