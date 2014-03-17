@@ -1,6 +1,7 @@
 (ns http-dedup.core
   (:gen-class)
   (:require [clojure.core.async :as async :refer [go go-loop <! >!]]
+            [clojure.tools.cli :as cli]
             [http-dedup.socket-manager :as sockman]
             [http-dedup.air-traffic-controller :as atc]
             [http-dedup.async-utils :refer [go-loop-<!]]
@@ -44,11 +45,11 @@
      (when request
        (atc/board atc request write-channel bufs)))))
 
-(defn run-server [listen-port connect-port]
+(defn run-server [listen-addr listen-port connect-addr connect-port]
   (let [controlch (async/chan)
         sockman (sockman/socket-manager)
-        connch (sockman/listen sockman "0.0.0.0" listen-port) ; FIXME: localhost
-        atc (atc/air-traffic-controller sockman nil connect-port)]
+        connch (sockman/listen sockman listen-addr listen-port)
+        atc (atc/air-traffic-controller sockman connect-addr connect-port)]
     (go-loop-<!
      connch socket
      (apply handle-incoming atc (<! (sockman/accept sockman socket))))
@@ -57,14 +58,31 @@
         (async/close! atc))
     controlch))
 
-(defn -main
-  "I don't do a whole lot ... yet."
-  [& args]
-  (taoensso.timbre/set-level! :trace)
-  (taoensso.timbre/merge-config! {:timestamp-pattern "yyyy-MM-dd HH:mm:ss"} )
+(def cli-options
+  [["-l" "--listen [HOST:]PORT" "Listen address"
+    :default [nil 8081]
+    :parse-fn #(let [[_ h p] (re-matches #"(?:([^:]+):)?(\d+)" %)] [h (Integer/parseInt p)])
+    :validate [#(< 0 (second %) 0x10000) "Port must be 1-65535"]]
+   ["-c" "--connect [HOST:]PORT" "Connect address"
+    :default [nil 8080]
+    :parse-fn #(let [[_ h p] (re-matches #"(?:([^:]+):)?(\d+)" %)] [h (Integer/parseInt p)])
+    :validate [#(< 0 (second %) 0x10000) "Port must be 1-65535"]]
+   ["-v" "--verbose" "Verbosity level"
+    :id :verbosity
+    :default 0
+    :assoc-fn (fn [m k _] (update-in m [k] inc))]])
 
-  (let [[listen-port connect-port] (map #(Integer. %) args)]
-    (if (and (< 0 listen-port 65536)
-             (< 0 connect-port 65536))
-      (async/<!! (run-server listen-port connect-port))
-      (println "Usage: http-dedup [listen-port] [connect-port]"))))
+(defn -main
+  [& args]
+  (let [{{:keys [verbosity listen connect]} :options
+         summary :summary
+         errs :errors} (cli/parse-opts args cli-options)]
+    (if errs
+      (do (println errs)
+          (println "Usage: http-dedup [opts]")
+          (println summary))
+      (do (taoensso.timbre/set-level! (condp < verbosity
+                                        1 :trace
+                                        0 :debug
+                                        :info))
+          (async/<!! (apply run-server (into listen connect)))))))
