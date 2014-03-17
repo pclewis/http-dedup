@@ -80,7 +80,7 @@
   (listen
    [out host port]
    (let [socket (doto (ServerSocketChannel/open) (.configureBlocking false))]
-     (.bind socket (InetSocketAddress. (InetAddress/getByName host) port))
+     (.bind (.socket socket) (InetSocketAddress. (InetAddress/getByName host) port))
      (async/pipe (acceptor socket) out)
      nil))
 

@@ -18,7 +18,7 @@
 (defn make-server []
   (doto (ServerSocketChannel/open)
     (.configureBlocking false)
-    (.bind (InetSocketAddress. (InetAddress/getByName nil) 0))))
+    (-> .socket (.bind (InetSocketAddress. (InetAddress/getByName nil) 0)))))
 
 (defn make-client [server]
   (doto (SocketChannel/open)
