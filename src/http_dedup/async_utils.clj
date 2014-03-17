@@ -63,9 +63,7 @@
                                                               `(let [~(second f) (rest ~msg_)]
                                                                  ~@(drop 2 f))))))
                                     (catch Throwable t
-                                      (println "Exception in message handler:")
-                                      (clojure.stacktrace/print-cause-trace t)
-                                      nil) )]
+                                      (log/error t "Exception in message handler:")))]
                              (if (map? res#)
                                (merge ~state_ res#)
                                ~state_))))

@@ -18,25 +18,35 @@
   (fn writer [socket]
     (let [inch (async/chan)]
       (go-loop []
-               (when-let [buf (<! inch)]
-                 (log/trace "Received a buffer to write" buf)
-                 (while (.hasRemaining buf)
-                   (if (<! (select/write select socket))
-                     (.write socket buf)
-                     (.clear buf)))
-                 (bufman/return bufman buf)
-                 (recur)))
+               (if-let [buf (<! inch)]
+                 (do (log/trace "Received a buffer to write" buf)
+                     (while (.hasRemaining buf)
+                       (if (<! (select/write select socket))
+                         (try (.write socket buf)
+                              (catch java.nio.channels.ClosedChannelException _
+                                (.position buf (.limit buf))))
+                         (.position buf (.limit buf))))
+                     (bufman/return bufman buf)
+                     (recur))
+                 (do (log/debug "write: closing connection" socket)
+                     (select/close select socket))))
       inch))
 
-  (fn reader [socket]
+  (fn reader [socket wch]
     (let [outch (async/chan)]
       (go-loop []
                (when (<! (select/read select socket))
                  (let [buf (<! (bufman/request bufman))
-                       n-read (.read socket buf)]
+                       n-read (try (.read socket buf)
+                                   (catch java.nio.channels.ClosedChannelException _
+                                     -1))]
                    (log/trace "Received" n-read "bytes on socket" buf)
-                   (if (>= 0 n-read)
-                     (bufman/return bufman buf) ;FIXME close socket..
+                   (if (> 0 n-read)
+                     (do (log/debug "read: closing connection" socket)
+                         (bufman/return bufman buf)
+                         (async/close! outch)
+                         (async/close! wch)
+                         (select/close select socket))
                      (do (.flip buf)
                          (>! outch buf)
                          (recur))))))
@@ -76,8 +86,8 @@
 
   (accept
    [out socket]
-   (let [rch (reader socket)
-         wch (writer socket)]
+   (let [wch (writer socket)
+         rch (reader socket wch)]
      (>! out [rch wch])))
 
   (return-buffer [buf] (bufman/return bufman buf))

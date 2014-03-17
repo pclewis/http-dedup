@@ -26,16 +26,29 @@
 
        (let [closed?
              (loop [msg (get!! subch)] ; false if empty, nil if closed
-               (log/debug "Got message: " msg)
-               (if msg
+               (if-not msg
+                 (nil? msg)
                  (let [[op ch rch] msg
                        sk (.keyFor ch selector)]
-                   (if sk
-                     (do (.interestOps sk (bit-or (.interestOps sk) op))
-                         (.attach sk (merge-with concat (.attachment sk) {op [rch]})))
-                     (.register ch selector op {op [rch]}))
-                   (recur (get!! subch)))
-                 (nil? msg)))]
+                   (log/debug "Got message: " msg)
+                   (if-not (.isOpen ch)
+                     (do (log/trace "request on closed channel" ch)
+                         (async/close! rch))
+                     (if (= 0 op)
+                       (do (log/debug "Closing connection" ch)
+                           (when sk
+                             (when-let [a (.attachment sk)]
+                               (doseq [[_ chs] a
+                                       ch chs]
+                                 (async/close! ch)))
+                             (.cancel sk))
+                           (.close ch))
+                       (if sk
+                         (when (.isValid sk)
+                           (do (.interestOps sk (bit-or (.interestOps sk) op))
+                               (.attach sk (merge-with concat (.attachment sk) {op [rch]}))))
+                         (.register ch selector op {op [rch]}))))
+                   (recur (get!! subch)))))]
          (when-not closed?
            (recur))))
      (log/info "Select thread exiting")
@@ -60,4 +73,5 @@
   (read [out socket] (sub SelectionKey/OP_READ socket out))
   (write [out socket] (sub SelectionKey/OP_WRITE socket out))
   (accept [out socket] (sub SelectionKey/OP_ACCEPT socket out))
-  (connect [out socket] (sub SelectionKey/OP_CONNECT socket out)))
+  (connect [out socket] (sub SelectionKey/OP_CONNECT socket out))
+  (close [out socket] (sub 0 socket out)))

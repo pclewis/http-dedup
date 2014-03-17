@@ -21,7 +21,7 @@
            (let [buf (first pool)]
              (if buf
                (do
-                 (log/trace "Giving out " buf " (id=" (buf-id buf) ")")
+                 (log/trace "Giving out" (buf-id buf))
                  (let [id (buf-id buf)]
                    (>! out buf)
                    {:id-map (assoc id-map id buf)
@@ -36,6 +36,7 @@
               src-id (buf-id src)
               dst (.asReadOnlyBuffer buf)
               dst-id (buf-id dst)]
+          (log/trace "Cloning" src-id "->" dst-id)
           (>! out dst)
           (when-let [refs (ref-map src-id)]
             {:ref-map (assoc ref-map src-id (conj refs dst-id))
@@ -45,7 +46,7 @@
           (let [src (parent buf)
                 src-id (buf-id src)
                 id (buf-id buf)]
-            (log/trace "Buffer returned: " {:buf buf :buf-id id :src src :src-id src-id})
+            (log/trace "Buffer returned:" id " (clone of" src-id ")" )
             (when-let [refs (disj (ref-map src-id) id)]
               (if (empty? refs)
                 (do

@@ -4,7 +4,7 @@
   :license {:name "Proprietary"
             :url "http://dctf.ytmnd.com"}
   :dependencies [[org.clojure/clojure "1.5.1"]
-                 [org.clojure/core.async "0.1.267.0-0d7780-alpha"]
+                 [org.clojure/core.async "0.1.278.0-76b25b-alpha"]
                  [com.taoensso/timbre "3.1.6"]]
   :main ^:skip-aot http-dedup.core
   :target-path "target/%s"
