@@ -5,16 +5,21 @@
              [async-utils :refer :all]
              [select :as select]
              [buffer-manager :as bufman]]
-            [clojure.core.async :as async :refer [go go-loop >! <!]]))
+            [clojure.core.async :as async :refer [go go-loop >! <!]]
+            [taoensso.timbre :as log]))
 
 (defasync socket-manager [select bufman]
   (create [] {:select (select/select)
               :bufman (bufman/buffer-manager 16 32767)})
 
+  (destroy (async/close! select)
+           (async/close! bufman))
+
   (fn writer [socket]
     (let [inch (async/chan)]
       (go-loop []
                (when-let [buf (<! inch)]
+                 (log/trace "Received a buffer to write" buf)
                  (while (.hasRemaining buf)
                    (if (<! (select/write select socket))
                      (.write socket buf)
@@ -29,9 +34,11 @@
                (when (<! (select/read select socket))
                  (let [buf (<! (bufman/request bufman))
                        n-read (.read socket buf)]
+                   (log/trace "Received" n-read "bytes on socket" buf)
                    (if (>= 0 n-read)
                      (bufman/return bufman buf) ;FIXME close socket..
-                     (do (>! outch buf)
+                     (do (.flip buf)
+                         (>! outch buf)
                          (recur))))))
       outch))
 
@@ -49,6 +56,7 @@
       (go-loop []
                (when (<! (select/accept select socket))
                  (let [new-sock (.accept socket)]
+                   (.configureBlocking new-sock false)
                    (>! outch new-sock)
                    (recur))))
       outch))

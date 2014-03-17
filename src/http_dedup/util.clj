@@ -20,4 +20,5 @@
       old-value
       (recur @atom))))
 
-(defn bytebuf-to-str [bb] (-> ASCII .newDecoder (.decode bb) .toString))
+(defn bytebuf-to-str [bb] (.toString (.decode ASCII bb)))
+(defn str-to-bytebuf [s] (.encode ASCII s))
