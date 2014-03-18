@@ -39,13 +39,15 @@
     `(do
        ~@(for [f methods :let [fname (first f)
                                args (second f)]]
-           (if (= 'out (first args))
-             `(defn ~fname ~(into [name] (rest args))
-                (let [~(first args) (async/chan)]
-                  (go (>! ~name ~(into [(keyword fname)] args)))
-                  ~(first args)))
-             `(defn ~fname ~(into [name] args)
-                (go (>! ~name ~(into [(keyword fname)] args))))))
+           `(defn ~fname
+              ~@(when (= 'out (first args))
+                  `((~(into [name] (rest args))
+                     (let [~(first args) (async/chan)]
+                       (~fname ~name ~@args)
+                       ~(first args)))))
+
+              (~(into [name] args)
+               (go (>! ~name ~(into [(keyword fname)] args))))))
 
        (defn ~name ~(if ctor (second ctor) `[])
          (let [ch# (async/chan)]
@@ -106,9 +108,12 @@
 (defn drain
   ([ch] (drain ch identity))
   ([ch f & args]
-     (let [fa (apply partial f args)]
-       (go-loop-<! ch msg (fa msg)))))
-
+     (if (fn? ch)
+       (let [nch (async/chan)]
+         (apply drain nch ch f args)
+         nch)
+       (let [fa (apply partial f args)]
+         (go-loop-<! ch msg (fa msg))))))
 
 (defmacro thread [& body]
   `(async/thread

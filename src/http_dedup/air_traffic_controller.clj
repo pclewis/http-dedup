@@ -7,47 +7,46 @@
 ; how to take a metaphor too far
 
 (defasync air-traffic-controller [flights sockman host port this]
-  (create [sockman host port] {:sockman sockman :host host :port port :flights {}})
+  (create [sockman host port]
+          {:sockman sockman
+           :host host
+           :port port
+           :flights {}})
+
   (destroy (async/close! sockman))
 
-  (fn dump-bags [ps [p bs]]
-    (doseq [b bs]
-      (sockman/return-buffer sockman b))
-    (conj ps p))
+  (fn accept-passengers [jetway]
+    (async/reduce (fn [ps [p bs]]
+                    (dorun (map #(sockman/return-buffer sockman %) bs))
+                    (conj ps p))
+                  [] jetway))
 
   (fn start-flight [destination]
-    (let [jetway (async/chan)
+    (let [jetway (async/chan) ; receives [channel [buffers]]
           dest-name (first (clojure.string/split-lines destination))]
       (go
-       (log/trace "Starting flight to" dest-name)
-       (let [[first-passenger req-bags] (<! jetway)
-             boarding (async/reduce dump-bags [] jetway) ; start accepting passengers
-             new-sock (<! (sockman/connect sockman host port))
-             [read-channel write-channel] (<! (sockman/accept sockman new-sock))
-             _ (async/onto-chan write-channel req-bags false)
-             first-block (<! read-channel) ; wait for first block
-             _ (depart this destination)   ; let atc know we're leaving so they close the jetway
-             other-passengers (<! boarding)] ; find out who boarded
-         (log/info "Flight to" dest-name "has" (inc (count other-passengers)) "passengers")
-         (loop [block first-block]
-           (when block
-
-             (doseq [p other-passengers]
-               (let [b (<! (sockman/copy-buffer sockman block))]
-                 (when-not (>! p b)
-                   (sockman/return-buffer sockman b))))
-             (when-not (>! first-passenger block)
-               (sockman/return-buffer sockman block))
-             (recur (<! read-channel))))
-         (doseq [p (conj other-passengers first-passenger)]
-           (async/close! p))))
+       (log/trace "start-flight: boarding to" dest-name)
+       (let [[pilot flight-plan] (<! jetway)
+             boarding (accept-passengers jetway)
+             [read-channel write-channel] (->> (sockman/connect sockman host port) <!
+                                               (sockman/accept sockman) <!)
+             _ (async/onto-chan write-channel flight-plan false)
+             first-block (<! read-channel) ; don't take off till .. the analogy breaks down
+             _ (depart this destination)   ; stop sending new passengers
+             passengers (<! boarding)]
+         (log/info "start-flight: departing to" dest-name "with" (inc (count passengers)) "passengers")
+         (loop [buf first-block]
+           (doseq [p passengers] (>! p (<! (sockman/copy-buffer sockman buf))))
+           (when-not (>! pilot buf) (sockman/return-buffer sockman buf))
+           (recur (<! read-channel)))
+         (doseq [p (conj passengers pilot)] (async/close! p))))
       jetway))
 
   (board
    [destination passenger bags]
    (let [flight (or (get flights destination)
                     (start-flight destination))]
-     (>! flight [passenger bags])
+     (>! flight [passenger bags]) ; no race condition: only we close flight channel
      {:flights (assoc flights destination flight)}))
 
   (depart

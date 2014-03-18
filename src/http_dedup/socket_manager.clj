@@ -90,5 +90,5 @@
          rch (reader socket wch)]
      (>! out [rch wch])))
 
-  (return-buffer [buf] (bufman/return bufman buf))
-  (copy-buffer [out buf] (async/pipe (bufman/copy bufman buf) out)))
+  (return-buffer [buf] (<! (bufman/return bufman buf)))
+  (copy-buffer [out buf] (<! (bufman/copy bufman out buf))))

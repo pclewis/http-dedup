@@ -30,7 +30,7 @@
                  (nil? msg)
                  (let [[op ch rch] msg
                        sk (.keyFor ch selector)]
-                   (log/debug "Got message: " msg)
+                   (log/trace "selector: got message: " msg)
                    (if-not (.isOpen ch)
                      (do (log/trace "request on closed channel" ch)
                          (async/close! rch))

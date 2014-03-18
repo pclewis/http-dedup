@@ -18,6 +18,7 @@
 
 (deftest socket-manager-test
   (let [incoming-ch (sockman/listen *sockman* nil port)
+        _ (<!! (async/timeout 5)) ; sometimes listen isn't ready yet
         client->server (<!! (sockman/connect *sockman* nil port))
         server->client (<!! incoming-ch)
         [s<c s>c] (<!! (sockman/accept *sockman* server->client))

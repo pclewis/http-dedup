@@ -76,6 +76,28 @@
       (is (identical? b1 (<!! b3c)))
       (is (= (.capacity b1) (.limit b1)))
       (is (= 0 (.position b1)))
+      (doseq [b [b1 b2]] (return *bufman* b))))
+
+  (testing "Giving buffers to a closed channel"
+    (let [c (async/chan)]
+      (async/close! c)
+      (request *bufman* c)
+      (let [[b1 b2] (repeatedly #(get!! (request *bufman*) nil 10))]
+        (is b1)
+        (is b2)
+        (doseq [b [b1 b2]] (return *bufman* b)))))
+
+  (testing "Returning buffers with closed channels waiting"
+    (let [[b1 b2] (repeatedly #(<!! (request *bufman*)))
+          b3c (request *bufman*)
+          b4c (request *bufman*)]
+      (async/close! b3c)
+      (return *bufman* b1)
+      (is (identical? b1 (<!! b4c)))
+      (let [b5c (request *bufman*)]
+        (async/close! b5c)
+        (return *bufman* b2)
+        (is (identical? b2 (<!! (request *bufman*)))))
       (doseq [b [b1 b2]] (return *bufman* b)))))
 
 
