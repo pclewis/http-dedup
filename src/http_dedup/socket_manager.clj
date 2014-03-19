@@ -9,8 +9,8 @@
             [taoensso.timbre :as log]))
 
 (defasync socket-manager [select bufman]
-  (create [] {:select (select/select)
-              :bufman (bufman/buffer-manager 16 32767)})
+  (create [select bufman] {:select (or select (select/select))
+                           :bufman (or bufman (bufman/buffer-manager 16 32767))})
 
   (destroy (async/close! select)
            (async/close! bufman))
@@ -21,11 +21,11 @@
                (if-let [buf (<! inch)]
                  (do (log/trace "Received a buffer to write" buf)
                      (while (.hasRemaining buf)
-                       (if (<! (select/write select socket))
-                         (try (.write socket buf)
-                              (catch java.nio.channels.ClosedChannelException _
-                                (.position buf (.limit buf))))
-                         (.position buf (.limit buf))))
+                       (when-not (and (<! (select/write select socket))
+                                      (try (.write socket buf)
+                                           (catch java.nio.channels.ClosedChannelException _ nil)))
+                         (log/debug "write: socket is closed, discarding buffer")
+                         (.limit buf 0)))
                      (bufman/return bufman buf)
                      (recur))
                  (do (log/debug "write: closing connection" socket)
@@ -35,7 +35,7 @@
   (fn reader [socket wch]
     (let [outch (async/chan)]
       (go-loop []
-               (when (<! (select/read select socket))
+               (if (<! (select/read select socket))
                  (let [buf (<! (bufman/request bufman))
                        n-read (try (.read socket buf)
                                    (catch java.nio.channels.ClosedChannelException _
@@ -48,40 +48,40 @@
                          (async/close! wch)
                          (select/close select socket))
                      (do (.flip buf)
-                         (>! outch buf)
-                         (recur))))))
+                         (or (>! outch buf)
+                             (bufman/return bufman buf))
+                         (recur))))
+                 (do (log/debug "read: connection closed")
+                     (async/close! outch)
+                     (async/close! wch))))
       outch))
 
-  (fn connector [socket]
-    (let [outch (async/chan)]
-      (go-loop []
-               (when (<! (select/connect select socket))
-                 (if (.finishConnect socket)
-                   (>! outch socket)
-                   (recur))))
-      outch))
+  (fn connector [socket outch]
+    (go-loop []
+             (when (<! (select/connect select socket))
+               (if (.finishConnect socket)
+                 (>! outch socket)
+                 (recur)))))
 
-  (fn acceptor [socket]
-    (let [outch (async/chan)]
-      (go-loop []
-               (when (<! (select/accept select socket))
-                 (let [new-sock (.accept socket)]
-                   (.configureBlocking new-sock false)
-                   (>! outch new-sock)
-                   (recur))))
-      outch))
+  (fn acceptor [socket outch]
+    (go-loop []
+             (when (<! (select/accept select socket))
+               (let [new-sock (.accept socket)]
+                 (.configureBlocking new-sock false)
+                 (>! outch new-sock)
+                 (recur)))))
 
   (connect
    [out host port]
    (let [socket (doto (SocketChannel/open) (.configureBlocking false))]
      (.connect socket (InetSocketAddress. (InetAddress/getByName host) port))
-     (async/pipe (connector socket) out)))
+     (connector socket out)))
 
   (listen
    [out host port]
    (let [socket (doto (ServerSocketChannel/open) (.configureBlocking false))]
      (.bind (.socket socket) (InetSocketAddress. (InetAddress/getByName host) port))
-     (async/pipe (acceptor socket) out)
+     (acceptor socket out)
      nil))
 
   (accept

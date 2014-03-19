@@ -1,11 +1,16 @@
 (ns http-dedup.core
   (:gen-class)
+  (:import [jline.console ConsoleReader])
   (:require [clojure.core.async :as async :refer [go go-loop <! >!]]
             [clojure.tools.cli :as cli]
-            [http-dedup.socket-manager :as sockman]
-            [http-dedup.air-traffic-controller :as atc]
-            [http-dedup.async-utils :refer [go-loop-<!]]
-            [http-dedup.util :refer [bytebuf-to-str str-to-bytebuf]]))
+            [taoensso.timbre :as log]
+            [http-dedup
+             [buffer-manager :as bufman]
+             [socket-manager :as sockman]
+             [air-traffic-controller :as atc]
+             [select :as select]
+             [async-utils :refer [go-loop-<!]]
+             [util :refer [bytebuf-to-str str-to-bytebuf]]]))
 
 (defn drop-bytes
   [n bufs]
@@ -43,19 +48,32 @@
   (go
    (let [[request bufs] (<! (read-request read-channel))]
      (when request
-       (atc/board atc request write-channel bufs)))))
+       (let [new-read-channel (async/chan)]
+         (async/onto-chan new-read-channel bufs false)
+         (async/pipe read-channel new-read-channel)
+         (atc/board atc request write-channel new-read-channel))))))
 
 (defn run-server [listen-addr listen-port connect-addr connect-port]
   (let [controlch (async/chan)
-        sockman (sockman/socket-manager)
+        bufman (bufman/buffer-manager 16 32768)
+        select (select/select)
+        sockman (sockman/socket-manager select bufman)
         connch (sockman/listen sockman listen-addr listen-port)
         atc (atc/air-traffic-controller sockman connect-addr connect-port)]
     (go-loop-<!
      connch socket
      (apply handle-incoming atc (<! (sockman/accept sockman socket))))
-    (go (<! controlch)
-        (async/close! sockman)
-        (async/close! atc))
+    (go-loop []
+             (if-let [[msg & args] (<! controlch)]
+               (do (case msg
+                     :bufman (>! bufman [:debug-state])
+                     :sockman (>! sockman [:debug-state])
+                     :atc (>! atc [:debug-state])
+                     :select (>! select [:debug-select-thread])
+                     nil)
+                   (recur))
+               (do (async/close! sockman)
+                   (async/close! atc))))
     controlch))
 
 (def cli-options
@@ -72,6 +90,39 @@
     :default 0
     :assoc-fn (fn [m k _] (update-in m [k] inc))]])
 
+(def ^java.text.SimpleDateFormat ^:private iso8601 (java.text.SimpleDateFormat. "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"))
+(.setTimeZone iso8601 (java.util.TimeZone/getTimeZone "UTC"))
+
+(defn iso8601-format
+  "Format a date using ISO8601 format. Always UTC."
+  [date]
+  (.format iso8601 date))
+
+(def ns-colors (ref {}))
+(def next-ns-color (ref 1))
+(defn ns-color [ns]
+  (when-not (@ns-colors ns)
+    (dosync (alter ns-colors assoc ns (alter next-ns-color #(mod (inc %) 8)))))
+  (@ns-colors ns))
+(defn- color-str [i]
+  (format "\u001b[%dm" i))
+
+(defn pretty-log
+  [cr {:keys [level throwable instant ns message]}]
+  (let [base-color (case level
+                     (:warn :error) 31
+                     (:info) 36
+                     0)]
+    (locking cr ; so we don't trip on ourselves
+      (println (format "\r%s%s %s [%s%s%s] - %s%s"
+                       (color-str base-color)
+                       (iso8601-format instant)
+                       (-> level name clojure.string/upper-case)
+                       (color-str (+ 30 (ns-color ns))) ns (color-str base-color)
+                       (or message "") (or (log/stacktrace throwable "\n") "")))))
+  (.drawLine cr)
+  (.flush cr))
+
 (defn -main
   [& args]
   (let [{{:keys [verbosity listen connect]} :options
@@ -81,8 +132,26 @@
       (do (println errs)
           (println "Usage: http-dedup [opts]")
           (println summary))
-      (do (taoensso.timbre/set-level! (condp < verbosity
-                                        1 :trace
-                                        0 :debug
-                                        :info))
-          (async/<!! (apply run-server (into listen connect)))))))
+      (do (log/set-level! (condp < verbosity
+                            1 :trace
+                            0 :debug
+                            :info))
+
+          (log/info "Listening on" listen " -- fowarding connections to" connect)
+          (let [server (apply run-server (into listen connect))
+                reader (ConsoleReader.)]
+            (log/set-config! [:appenders :pretty] {:enabled? true
+                                                   :fn (partial pretty-log reader)})
+            (log/set-config! [:appenders :standard-out :enabled?] false)
+            (loop []
+              (when-let [line (.readLine reader "http-dedup> ")]
+                (let [[cmd & args] (clojure.string/split line #"\s+")]
+                  (case (keyword cmd)
+                    :quit nil
+                    :bufman (async/>!! server [:bufman])
+                    :sockman (async/>!! server [:sockman])
+                    :atc (async/>!! server [:atc])
+                    :select (async/>!! server [:select])
+                    (println "Unrecognized command: " cmd))
+                  (when-not (= cmd "quit") (recur)))))
+            (async/close! server))))))

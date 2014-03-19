@@ -1,5 +1,6 @@
 (ns http-dedup.async-utils
   (:require [clojure.core.async :as async :refer [go go-loop <! >!]]
+            [clojure.pprint :refer [pprint]]
             [taoensso.timbre :as log]))
 
 (defmacro defasync
@@ -60,6 +61,10 @@
                           (recur
                            (let [res# (try
                                     (condp = (first ~msg_)
+                                      :debug-state (log/debug
+                                                    (let [w# (java.io.StringWriter.)]
+                                                      (pprint ~state_ w#)
+                                                      (.toString w#)))
                                       ~@(apply concat (for [f methods]
                                                         (list (keyword (first f))
                                                               `(let [~(second f) (rest ~msg_)]

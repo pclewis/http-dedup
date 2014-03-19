@@ -15,31 +15,39 @@
 
   (destroy (async/close! sockman))
 
-  (fn accept-passengers [jetway]
+  (fn accept-passengers [jetway garbage]
     (async/reduce (fn [ps [p bs]]
-                    (dorun (map #(sockman/return-buffer sockman %) bs))
+                    (async/pipe bs garbage false)
                     (conj ps p))
                   [] jetway))
 
   (fn start-flight [destination]
     (let [jetway (async/chan) ; receives [channel [buffers]]
+          garbage (async/chan)
           dest-name (first (clojure.string/split-lines destination))]
       (go
+       ;dumb: map< without closing
+       (async/pipe (async/map< #(vector :return-buffer %) garbage) sockman false)
        (log/trace "start-flight: boarding to" dest-name)
        (let [[pilot flight-plan] (<! jetway)
-             boarding (accept-passengers jetway)
+             boarding (accept-passengers jetway garbage)
              [read-channel write-channel] (->> (sockman/connect sockman host port) <!
                                                (sockman/accept sockman) <!)
-             _ (async/onto-chan write-channel flight-plan false)
+             _ (async/pipe flight-plan write-channel)
              first-block (<! read-channel) ; don't take off till .. the analogy breaks down
              _ (depart this destination)   ; stop sending new passengers
              passengers (<! boarding)]
          (log/info "start-flight: departing to" dest-name "with" (inc (count passengers)) "passengers")
          (loop [buf first-block]
-           (doseq [p passengers] (>! p (<! (sockman/copy-buffer sockman buf))))
-           (when-not (>! pilot buf) (sockman/return-buffer sockman buf))
-           (recur (<! read-channel)))
-         (doseq [p (conj passengers pilot)] (async/close! p))))
+           (when buf
+             (doseq [p passengers :let [copy (<! (sockman/copy-buffer sockman buf))]]
+               (or (>! p copy) (>! garbage copy)))
+             (or (>! pilot buf) (>! garbage buf))
+             (recur (<! read-channel))))
+         (log/debug "start-flight: exited read loop...")
+         (doseq [p (conj passengers pilot)] (async/close! p))
+         (async/close! garbage)
+         (log/debug "start-flight: flight to" dest-name "finished")))
       jetway))
 
   (board
@@ -53,3 +61,19 @@
    [destination]
    (async/close! (get flights destination))
    {:flights (dissoc flights destination)}))
+
+
+(comment
+  (let [[a b c] (repeatedly async/chan)]
+    (async/<!!
+     (go
+      (take 3 (iterate #(<! %) a))))
+    ;(async/>!! a b)
+    )
+
+  (async/<!!
+   (go
+    (doseq [a [1 2 3] :let [b (<! (async/timeout 100))]]
+      (println a))))
+
+  )

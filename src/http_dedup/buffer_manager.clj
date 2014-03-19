@@ -50,20 +50,22 @@
                 src-id (buf-id src)
                 id (buf-id buf)]
             (log/trace "return:" id "(clone of" src-id ")" )
-            (if-let [refs (disj (ref-map src-id) id)]
-              (if (empty? refs)
-                (do (log/trace "return: no more references to" src-id)
-                    (.clear src)
-                    (or (loop [pr pending-requests]
-                          (when (not-empty pr)
-                            (if (>! (peek pr) src)
-                              (do (log/trace "return: gave" src-id "to waiting request")
-                                  {:ref-map (assoc ref-map src-id #{src-id})
-                                   :pending-requests (pop pending-requests)})
-                              (do (log/trace "return: pending requester went away, removing from queue")
-                                  (recur (pop pr))))))
-                        {:pending-requests (empty pending-requests) ; only get here if no prs
-                         :pool (cons src pool)
-                         :ref-map (dissoc ref-map src-id)}))
-                {:ref-map (assoc ref-map src-id refs)})
-              (log/debug "return: buffer doesn't belong to us, discarding")))))
+            (merge
+             {:parent-map (dissoc parent-map id)} ; whatever else may happen, copies die here
+             (if-let [refs (disj (ref-map src-id) id)]
+               (if (empty? refs)
+                 (do (log/trace "return: no more references to" src-id)
+                     (.clear src)
+                     (or (loop [pr pending-requests]
+                           (when (not-empty pr)
+                             (if (>! (peek pr) src)
+                               (do (log/trace "return: gave" src-id "to waiting request")
+                                   {:ref-map (assoc ref-map src-id #{src-id})
+                                    :pending-requests (pop pending-requests)})
+                               (do (log/trace "return: pending requester went away, removing from queue")
+                                   (recur (pop pr))))))
+                         {:pending-requests (empty pending-requests) ; only get here if no prs
+                          :pool (cons src pool)
+                          :ref-map (dissoc ref-map src-id)}))
+                 {:ref-map (assoc ref-map src-id refs)})
+               (log/debug "return: buffer doesn't belong to us, discarding"))))))
