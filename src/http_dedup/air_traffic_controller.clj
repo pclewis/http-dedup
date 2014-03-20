@@ -33,7 +33,7 @@
              boarding (accept-passengers jetway garbage)
              [read-channel write-channel] (->> (sockman/connect sockman host port) <!
                                                (sockman/accept sockman) <!)
-             _ (async/pipe flight-plan write-channel)
+             _ (async/pipe flight-plan write-channel false)
              first-block (<! read-channel) ; don't take off till .. the analogy breaks down
              _ (depart this destination)   ; stop sending new passengers
              passengers (<! boarding)]
@@ -47,6 +47,7 @@
          (log/debug "start-flight: exited read loop...")
          (doseq [p (conj passengers pilot)] (async/close! p))
          (async/close! garbage)
+         (async/close! write-channel)
          (log/debug "start-flight: flight to" dest-name "finished")))
       jetway))
 
