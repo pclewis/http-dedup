@@ -1,6 +1,7 @@
 (ns http-dedup.core
   (:gen-class)
-  (:import [jline.console ConsoleReader])
+  (:import [jline.console ConsoleReader]
+           [jline.console.completer ArgumentCompleter StringsCompleter])
   (:require [clojure.core.async :as async :refer [go go-loop <! >!]]
             [clojure.tools.cli :as cli]
             [taoensso.timbre :as log]
@@ -111,6 +112,10 @@
             (log/set-config! [:appenders :pretty] {:enabled? true :fn pretty-log/pretty-log})
             (log/set-config! [:shared-appender-config :after-msg] #(doto reader .drawLine .flush))
             (log/set-config! [:appenders :standard-out :enabled?] false)
+            (.addCompleter reader (ArgumentCompleter.
+                               [(StringsCompleter. (map str '(quit bufman sockman atc select
+                                                                     repl level mute unmute)))
+                                (StringsCompleter. (map str (all-ns)))]))
             (loop []
               (when-let [line (.readLine reader "http-dedup> ")]
                 (let [[cmd & args] (clojure.string/split line #"\s+")]
@@ -122,6 +127,11 @@
                                                           (read-string line)
                                                           breaker))
                                                 :prompt #())
+                    ("level") (log/set-level! (keyword (first args)))
+                    ("mute") (log/set-config! [:ns-blacklist]
+                                              (conj (:ns-blacklist @log/config) (first args)))
+                    ("unmute") (log/set-config! [:ns-blacklist]
+                                                (remove (set args) (:ns-blacklist @log/config)))
                     (println "Unrecognized command: " cmd))
                   (when-not (= cmd "quit") (recur)))))
             (.shutdown reader)
