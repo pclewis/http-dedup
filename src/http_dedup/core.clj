@@ -5,6 +5,7 @@
             [clojure.tools.cli :as cli]
             [taoensso.timbre :as log]
             [http-dedup
+             [pretty-log :as pretty-log]
              [buffer-manager :as bufman]
              [socket-manager :as sockman]
              [air-traffic-controller :as atc]
@@ -12,24 +13,24 @@
              [async-utils :refer [go-loop-<!]]
              [util :refer [bytebuf-to-str str-to-bytebuf]]]))
 
-(defn drop-bytes
+(defn drop-bytes!
+  "Modify a sequence of buffers so that the first n bytes are removed.
+   If n is bigger than the first buffer, it will have .remaining=0, and so on."
   [n bufs]
-  (reduce (fn [x buf]
-            (let [size (- (.limit buf) (.position buf))
-                  btd (min x size)]
-              (.position buf (+ (.position buf) btd))
-              (- x btd)))
-          n bufs)
-  bufs)
-
+  (when-let [[buf & rest] (seq bufs)]
+    (let [size (.remaining buf)]
+      (if (> n size)
+        (do (.position buf (.limit buf))
+            (recur (- n size) rest))
+        (.position buf (+ (.position buf) n))))))
 
 (defn prepare-request
   "Change Connection: keep-alive to Connection: close and manage buffers
    appropriately. Necessary because the buffers may have already started
    reading the body of the request, which we need to preserve."
   [req bufs]
-  (let [new-bufs (drop-bytes (count req) bufs)
-        new-req (clojure.string/replace-first req
+  (drop-bytes! (count req) bufs)
+  (let [new-req (clojure.string/replace-first req
                                               #"(?m)^Connection: (.*)$"
                                               "Connection: close")]
     [new-req (into [(str-to-bytebuf new-req)] bufs)]))
@@ -90,39 +91,6 @@
     :default 0
     :assoc-fn (fn [m k _] (update-in m [k] inc))]])
 
-(def ^java.text.SimpleDateFormat ^:private iso8601 (java.text.SimpleDateFormat. "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"))
-(.setTimeZone iso8601 (java.util.TimeZone/getTimeZone "UTC"))
-
-(defn iso8601-format
-  "Format a date using ISO8601 format. Always UTC."
-  [date]
-  (.format iso8601 date))
-
-(def ns-colors (ref {}))
-(def next-ns-color (ref 1))
-(defn ns-color [ns]
-  (when-not (@ns-colors ns)
-    (dosync (alter ns-colors assoc ns (alter next-ns-color #(mod (inc %) 8)))))
-  (@ns-colors ns))
-(defn- color-str [i]
-  (format "\u001b[%dm" i))
-
-(defn pretty-log
-  [cr {:keys [level throwable instant ns message]}]
-  (let [base-color (case level
-                     (:warn :error) 31
-                     (:info) 36
-                     0)]
-    (locking cr ; so we don't trip on ourselves
-      (println (format "\r%s%s %s [%s%s%s] - %s%s"
-                       (color-str base-color)
-                       (iso8601-format instant)
-                       (-> level name clojure.string/upper-case)
-                       (color-str (+ 30 (ns-color ns))) ns (color-str base-color)
-                       (or message "") (or (log/stacktrace throwable "\n") "")))))
-  (.drawLine cr)
-  (.flush cr))
-
 (defn -main
   [& args]
   (let [{{:keys [verbosity listen connect]} :options
@@ -140,18 +108,21 @@
           (log/info "Listening on" listen " -- fowarding connections to" connect)
           (let [server (apply run-server (into listen connect))
                 reader (ConsoleReader.)]
-            (log/set-config! [:appenders :pretty] {:enabled? true
-                                                   :fn (partial pretty-log reader)})
+            (log/set-config! [:appenders :pretty] {:enabled? true :fn pretty-log/pretty-log})
+            (log/set-config! [:shared-appender-config :after-msg] #(doto reader .drawLine .flush))
             (log/set-config! [:appenders :standard-out :enabled?] false)
             (loop []
               (when-let [line (.readLine reader "http-dedup> ")]
                 (let [[cmd & args] (clojure.string/split line #"\s+")]
-                  (case (keyword cmd)
-                    :quit nil
-                    :bufman (async/>!! server [:bufman])
-                    :sockman (async/>!! server [:sockman])
-                    :atc (async/>!! server [:atc])
-                    :select (async/>!! server [:select])
+                  (case cmd
+                    ("quit" "") nil
+                    ("bufman" "sockman" "atc" "select") (async/>!! server (into [(keyword cmd)] args))
+                    ("repl") (clojure.main/repl :read (fn [_ breaker]
+                                                        (if-let [line (.readLine reader "repl> ")]
+                                                          (read-string line)
+                                                          breaker))
+                                                :prompt #())
                     (println "Unrecognized command: " cmd))
                   (when-not (= cmd "quit") (recur)))))
+            (.shutdown reader)
             (async/close! server))))))
