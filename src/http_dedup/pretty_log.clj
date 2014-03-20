@@ -28,11 +28,12 @@
                      (:info) 36
                      0)]
     (locking pretty-log ; so we don't trip on ourselves
-      (println (format "\r%s%s %s [%s%s%s] - %s%s"
+      (println (format "\r%s%s %s [%s%s%s] - %s%s%s"
                        (color-str base-color)
                        (iso8601-format instant)
                        (-> level name clojure.string/upper-case)
                        (color-str (+ 30 (ns-color ns))) ns (color-str base-color)
-                       (or message "") (or (log/stacktrace throwable "\n") "")))
+                       (or message "") (or (log/stacktrace throwable "\n") "")
+                       (color-str 0)))
       (when-let [f (:after-msg ap-config)]
         (f)))))
