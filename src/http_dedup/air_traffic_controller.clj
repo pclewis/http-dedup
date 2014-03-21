@@ -44,7 +44,6 @@
                (or (>! p copy) (>! garbage copy)))
              (or (>! pilot buf) (>! garbage buf))
              (recur (<! read-channel))))
-         (log/debug "start-flight: exited read loop...")
          (doseq [p (conj passengers pilot)] (async/close! p))
          (async/close! garbage)
          (async/close! write-channel)
@@ -62,19 +61,3 @@
    [destination]
    (async/close! (get flights destination))
    {:flights (dissoc flights destination)}))
-
-
-(comment
-  (let [[a b c] (repeatedly async/chan)]
-    (async/<!!
-     (go
-      (take 3 (iterate #(<! %) a))))
-    ;(async/>!! a b)
-    )
-
-  (async/<!!
-   (go
-    (doseq [a [1 2 3] :let [b (<! (async/timeout 100))]]
-      (println a))))
-
-  )

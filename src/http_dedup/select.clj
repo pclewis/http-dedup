@@ -6,6 +6,14 @@
             [taoensso.timbre :as log])
   (:refer-clojure :exclude [read write]))
 
+(defn- op-to-kw [op]
+  (condp = op ; case never matches, for some reason
+    SelectionKey/OP_WRITE :write
+    SelectionKey/OP_READ :read
+    SelectionKey/OP_ACCEPT :accept
+    SelectionKey/OP_CONNECT :connect
+    0 :close))
+
 (defn selector-thread [selector]
   (let [subch (async/chan 1)] ; buffer 1 msg so someone can write and then wake us up
     (thread
@@ -20,7 +28,7 @@
              (.attach key (apply dissoc (.attachment key) opseq))
              (doseq [op opseq
                      r (get receivers op)]
-               (log/trace "Key" key "received op" op)
+               (log/trace "channel" (.channel key) "received op" (op-to-kw op))
                (go (>! r key))))
            (.clear keys)))
 
@@ -30,10 +38,14 @@
                  (nil? msg)
                  (if (= [:debug-state nil nil] msg)
                    (log/debug
-                    (map #(str (.channel %) "->" (.attachment %)) (.keys selector)))
+                    (map (fn [k] (str (.channel k) "->"
+                                     (clojure.string/join
+                                      "," (map #(str (op-to-kw (key %)) "->" (val %))
+                                               (.attachment k)))))
+                         (.keys selector)))
                    (let [[op ch rch] msg
                          sk (.keyFor ch selector)]
-                     (log/trace "selector: got message: " msg)
+                     (log/trace "selector: got message: " [(op-to-kw op) ch rch] )
                      (if-not (.isOpen ch)
                        (do (log/trace "request on closed channel" ch)
                            (async/close! rch))
@@ -41,15 +53,17 @@
                          (do (log/debug "Closing connection" ch)
                              (when sk
                                (when-let [a (.attachment sk)]
-                                 (doseq [[_ chs] a
-                                         ch chs]
-                                   (async/close! ch)))
+                                 (doseq [[_ achs] a
+                                         ach achs]
+                                   (async/close! ach)))
                                (.cancel sk))
                              (.close ch))
                          (if sk
-                           (when (.isValid sk)
+                           (if (.isValid sk)
                              (do (.interestOps sk (bit-or (.interestOps sk) op))
-                                 (.attach sk (merge-with concat (.attachment sk) {op [rch]}))))
+                                 (.attach sk (merge-with concat (.attachment sk) {op [rch]})))
+                             (do (log/error "SelectionKey became invalid.." ch)
+                                 (async/close! rch)))
                            (.register ch selector op {op [rch]}))))
                      (recur (get!! subch))))))]
          (when-not closed?

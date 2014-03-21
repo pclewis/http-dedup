@@ -57,7 +57,7 @@
 
 (defn run-server [listen-addr listen-port connect-addr connect-port]
   (let [controlch (async/chan)
-        bufman (bufman/buffer-manager 16 32768)
+        bufman (bufman/buffer-manager 2048 32768)
         select (select/select)
         sockman (sockman/socket-manager select bufman)
         connch (sockman/listen sockman listen-addr listen-port)

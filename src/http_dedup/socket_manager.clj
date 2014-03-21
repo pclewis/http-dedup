@@ -16,15 +16,15 @@
            (async/close! bufman))
 
   (fn writer [socket]
-    (let [inch (async/chan)]
+    (let [inch (async/chan 64)]
       (go-loop []
                (if-let [buf (<! inch)]
-                 (do (log/trace "Received a buffer to write" buf)
+                 (do (log/trace socket "received a buffer to write" buf)
                      (while (.hasRemaining buf)
                        (when-not (and (<! (select/write select socket))
                                       (< 0 (try (.write socket buf)
                                                 (catch java.nio.channels.ClosedChannelException _ -1))))
-                         (log/debug "write: socket is closed, discarding buffer")
+                         (log/debug "write: socket is closed, discarding buffer:" socket)
                          (.limit buf 0)))
                      (bufman/return bufman buf)
                      (recur))
@@ -33,7 +33,7 @@
       inch))
 
   (fn reader [socket wch]
-    (let [outch (async/chan)]
+    (let [outch (async/chan 64)]
       (go-loop []
                (if (<! (select/read select socket))
                  (let [buf (<! (bufman/request bufman))
