@@ -11,7 +11,7 @@
 (defn select-fixture [f]
   (binding [*select* (select/select)]
     (f)
-    (async/close! *select*)))
+    (select/shutdown! *select*)))
 
 (use-fixtures :each select-fixture)
 

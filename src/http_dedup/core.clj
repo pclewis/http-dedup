@@ -74,7 +74,7 @@
                      :bufman (>! bufman [:debug-state])
                      :sockman (>! sockman [:debug-state])
                      :atc (>! atc [:debug-state])
-                     :select (>! select [:debug-select-thread])
+                     :select (select/debug-select-thread select)
                      nil)
                    (recur))
                (do (async/close! sockman)

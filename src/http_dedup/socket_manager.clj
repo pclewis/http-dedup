@@ -12,7 +12,7 @@
   (create [select bufman] {:select (or select (select/select))
                            :bufman (or bufman (bufman/buffer-manager 16 32767))})
 
-  (destroy (async/close! select)
+  (destroy (select/shutdown! select)
            (async/close! bufman))
 
   (fn writer [socket]

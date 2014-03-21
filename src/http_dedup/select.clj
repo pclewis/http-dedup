@@ -2,7 +2,7 @@
   (:import [java.nio.channels Selector SelectionKey])
   (:require [clojure.core.async :as async :refer [go go-loop >! <! >!! <!!]]
             [http-dedup.async-utils :refer [defasync thread get!!]]
-            [http-dedup.util :refer [bit-seq]]
+            [http-dedup.util :refer [bit-seq pre-swap!]]
             [taoensso.timbre :as log])
   (:refer-clojure :exclude [read write]))
 
@@ -62,13 +62,13 @@
             (.register ch selector op {op [rch]})))))))
 
 (declare get-messages)
-(defn- selector-thread [selector manager]
+(defn- selector-thread [selector mailbox]
   (thread
    (loop []
      (when (< 0 (.select selector))
        (dispatch-events selector))
 
-     (when-let [messages (<!! (get-messages manager))]
+     (when-let [messages (pre-swap! mailbox empty)]
        (when (seq messages)
          (doseq [msg messages]
            (handle-message selector msg)))
@@ -79,27 +79,46 @@
      (.cancel k)
      (.close (.channel k)))))
 
-(defasync select [selector selector-thread mailbox this]
-  (create [] (let [selector (Selector/open)]
-               {:selector selector
-                :selector-thread (selector-thread selector this)
-                :mailbox []}))
+;; Don't do this agent-style because it is the busiest part of the system.
+;; If 2000 sockets want to write or close at the same time, core.async would
+;; hit the limit of 1024 parked puts on a single channel.
+;; We can still present the same API, however.
+(defn select []
+  (let [selector (Selector/open)
+        mailbox (atom [])]
+    {:selector selector
+     :thread (selector-thread selector mailbox)
+     :mailbox mailbox}))
 
-  (destroy (.wakeup selector))
+(defn- sub [select op socket out]
+  (let [c (count (swap! (:mailbox select) conj [op socket out]))]
+    (when (= 1 c)
+      (.wakeup (:selector select)))))
 
-  ;; there's a hard limit of 1024 parked puts on a channel.
-  ;; collect messages in a vector, so callers park on their own channel and not ours.
-  (fn sub [op socket out]
-    (when-not (seq mailbox)
-      (.wakeup selector))
-    {:mailbox (conj mailbox [op socket out])})
+(defmacro subfns [& ops]
+  (cons 'do
+        (for [op ops]
+          `(defn ~op
+             (~'[select socket]
+              (let [ch# (async/chan)]
+                (~op ~'select ch# ~'socket)
+                ch#))
+             (~'[select out socket]
+              (sub ~'select ~(symbol (str "SelectionKey/OP_" (clojure.string/upper-case (str op))))
+                   ~'socket ~'out))))))
 
-  (get-messages [out] (>! out mailbox)
-                {:mailbox []})
+(subfns read write accept connect)
 
-  (read [out socket] (sub SelectionKey/OP_READ socket out))
-  (write [out socket] (sub SelectionKey/OP_WRITE socket out))
-  (accept [out socket] (sub SelectionKey/OP_ACCEPT socket out))
-  (connect [out socket] (sub SelectionKey/OP_CONNECT socket out))
-  (close [out socket] (sub 0 socket out))
-  (debug-select-thread [] (sub :debug-state nil nil)))
+(defn close
+  ([select socket] (let [ch (async/chan)]
+                     (close select ch socket)
+                     ch))
+  ([select out socket] (sub select 0 socket out)))
+
+(defn debug-select-thread [select]
+  (sub select :debug-state nil nil))
+
+(defn shutdown! [select]
+  (let [messages (pre-swap! (:mailbox select) (fn [_] nil))]
+    (doseq [[_ _ ch] messages]
+      (async/close! ch))))
