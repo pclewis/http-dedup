@@ -60,9 +60,9 @@
       (.limit b1-1-1 (.limit b1))
       (is (= b1 b1-1-1))
       (return *bufman* b1)
-      (is (nil? (peek!! b3c 10)))
+      (is (nil? (peek!! b3c 50)))
       (return *bufman* b1-1)
-      (is (nil? (peek!! b3c 10)))
+      (is (nil? (peek!! b3c 50)))
       (return *bufman* b1-1-1)
       (is (identical? b1 (<!! b3c)))
       (doseq [b [b1 b2]] (return *bufman* b))))
@@ -82,7 +82,7 @@
     (let [c (async/chan)]
       (async/close! c)
       (request *bufman* c)
-      (let [[b1 b2] (repeatedly #(get!! (request *bufman*) nil 10))]
+      (let [[b1 b2] (repeatedly #(get!! (request *bufman*) nil 50))]
         (is b1)
         (is b2)
         (doseq [b [b1 b2]] (return *bufman* b)))))
@@ -99,21 +99,3 @@
         (return *bufman* b2)
         (is (identical? b2 (<!! (request *bufman*)))))
       (doseq [b [b1 b2]] (return *bufman* b)))))
-
-
-(comment
-  (run-tests 'http-dedup.buffer-manager-test)
-
-  (let [q (async/chan)]
-    (async/alt!! q nil :default 1 ))
-
-  (let [bm (buffer-manager 0 1)
-        req (request bm)]
-    (return bm nil)
-    (println "-----" (async/alt!! req :bad :default :good))
-    (Thread/sleep 1000)
-    (async/close! bm))
-
-  (clojure.repl/source return)
-
-  )

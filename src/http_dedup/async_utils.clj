@@ -36,26 +36,33 @@
         [[dtor] fns] (split-with #(= 'destroy (first %)) fns)
         [local-fns methods] (split-with #(= 'fn (first %)) fns)
         msg_ (gensym "msg")
-        state_ (gensym "state")]
+        state_ (gensym "state")
+        chan_ (if (some #{'this} fields)
+                'this
+                (gensym "ch"))
+        fields (remove #{'this} fields)]
     `(do
        ~@(for [f methods :let [fname (first f)
                                args (second f)]]
            `(defn ~fname
-              ~@(when (= 'out (first args))
+              ~@(if (= 'out (first args))
                   `((~(into [name] (rest args))
                      (let [~(first args) (async/chan)]
                        (~fname ~name ~@args)
-                       ~(first args)))))
-
-              (~(into [name] args)
-               (go (>! ~name ~(into [(keyword fname)] args))))))
+                       ~(first args)))
+                    (~(into [name] args)
+                     (go (or (>! ~name ~(into [(keyword fname)] args))
+                             (async/close! ~'out)))))
+                  `(~(into [name] args)
+                    (go (>! ~name ~(into [(keyword fname)] args)))))))
 
        (defn ~name ~(if ctor (second ctor) `[])
-         (let [ch# (async/chan)]
-           (go-loop [{:keys ~fields :as ~state_} (merge {:this ch#} ~@(when ctor (drop 2 ctor)))]
+         (let [~chan_ (async/chan)]
+           (go-loop [{:keys ~fields :as ~state_}
+                     ~@(if ctor (drop 2 ctor) `{})]
                     (let [~@(apply concat (for [f local-fns]
                                             (list (second f) f)))]
-                      (if-let [~msg_ (<! ch#)]
+                      (if-let [~msg_ (<! ~chan_)]
                         (do
                           (log/trace ~(str name) "received message:" ~msg_)
                           (recur
@@ -76,7 +83,7 @@
                                ~state_))))
                         (do (log/trace ~(str name) "closed.")
                             ~@(when dtor (rest dtor))))))
-           ch#)))))
+           ~chan_)))))
 
 
 ;(remove-ns 'http-dedup.async-utils)

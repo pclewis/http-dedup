@@ -8,7 +8,7 @@
             [clojure.core.async :as async :refer [go go-loop >! <!]]
             [taoensso.timbre :as log]))
 
-(defasync socket-manager [select bufman]
+(defasync socket-manager [select bufman this]
   (create [select bufman] {:select (or select (select/select))
                            :bufman (or bufman (bufman/buffer-manager 16 32767))})
 
@@ -59,9 +59,13 @@
   (fn connector [socket outch]
     (go-loop []
              (when (<! (select/connect select socket))
-               (if (.finishConnect socket)
-                 (>! outch socket)
-                 (recur)))))
+               (try
+                 (if (.finishConnect socket)
+                   (>! outch socket)
+                   (recur))
+                 (catch java.net.ConnectException e
+                   (log/error e "connector: connection failed:" socket)
+                   (async/close! outch))))))
 
   (fn acceptor [socket outch]
     (go-loop []
@@ -74,8 +78,12 @@
   (connect
    [out host port]
    (let [socket (doto (SocketChannel/open) (.configureBlocking false))]
-     (.connect socket (InetSocketAddress. (InetAddress/getByName host) port))
-     (connector socket out)))
+     (try
+       (.connect socket (InetSocketAddress. (InetAddress/getByName host) port))
+       (connector socket out)
+       (catch java.net.ConnectException e
+         (log/error e "connect: couldn't connect to" host ":" port)
+         (async/close! out)))))
 
   (listen
    [out host port]
@@ -89,6 +97,13 @@
    (let [wch (writer socket)
          rch (reader socket wch)]
      (>! out [rch wch])))
+
+  (connect-and-accept
+   [out host port]
+   (go
+    (if-let [conn (<! (connect this host port))]
+      (accept this out conn)
+      (async/close! out))))
 
   (return-buffer [buf] (<! (bufman/return bufman buf)))
   (copy-buffer [out buf] (<! (bufman/copy bufman out buf))))

@@ -14,6 +14,9 @@
              [async-utils :refer [go-loop-<!]]
              [util :refer [bytebuf-to-str str-to-bytebuf]]]))
 
+(defmethod clojure.core/print-method Throwable [t ^java.io.Writer writer]
+  (.write writer (log/stacktrace t "\n" {})))
+
 (defn drop-bytes!
   "Modify a sequence of buffers so that the first n bytes are removed.
    If n is bigger than the first buffer, it will have .remaining=0, and so on."

@@ -1,13 +1,15 @@
 (ns http-dedup.socket-manager-tests
   (:require [clojure.test :refer :all]
             [http-dedup.socket-manager :as sockman]
+            [http-dedup.buffer-manager :as bufman]
+            [http-dedup.select :as select]
             [http-dedup.util :refer [bytebuf-to-str str-to-bytebuf]]
             [clojure.core.async :as async :refer [>! >!! <! <!!]]))
 
 (declare ^:dynamic *sockman*)
 
 (defn sockman-fixture [f]
-  (binding [*sockman* (sockman/socket-manager)]
+  (binding [*sockman* (sockman/socket-manager (select/select) (bufman/buffer-manager 16 1024))]
     (try
       (f)
       (finally (async/close! *sockman*)))))

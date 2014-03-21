@@ -6,48 +6,56 @@
 
 ; how to take a metaphor too far
 
-(defasync air-traffic-controller [flights sockman host port this]
+(defasync air-traffic-controller [flights sockman host port trash-chute this]
   (create [sockman host port]
           {:sockman sockman
            :host host
            :port port
+           :trash-chute (async/map> #(vector :return-buffer %) sockman)
            :flights {}})
 
-  (destroy (async/close! sockman))
+  (destroy
+   (async/close! trash-chute) ; note: this also closes sockman
+   (async/close! sockman))
 
-  (fn accept-passengers [jetway garbage]
+  (fn accept-passengers [jetway]
     (async/reduce (fn [ps [p bs]]
-                    (async/pipe bs garbage false)
+                    (async/pipe bs trash-chute false)
                     (conj ps p))
                   [] jetway))
 
   (fn start-flight [destination]
     (let [jetway (async/chan) ; receives [channel [buffers]]
-          garbage (async/chan)
           dest-name (first (clojure.string/split-lines destination))]
       (go
-       ;dumb: map< without closing
-       (async/pipe (async/map< #(vector :return-buffer %) garbage) sockman false)
-       (log/trace "start-flight: boarding to" dest-name)
-       (let [[pilot flight-plan] (<! jetway)
-             boarding (accept-passengers jetway garbage)
-             [read-channel write-channel] (->> (sockman/connect sockman host port) <!
-                                               (sockman/accept sockman) <!)
-             _ (async/pipe flight-plan write-channel false)
-             first-block (<! read-channel) ; don't take off till .. the analogy breaks down
-             _ (depart this destination)   ; stop sending new passengers
-             passengers (<! boarding)]
-         (log/info "start-flight: departing to" dest-name "with" (inc (count passengers)) "passengers")
-         (loop [buf first-block]
-           (when buf
-             (doseq [p passengers :let [copy (<! (sockman/copy-buffer sockman buf))]]
-               (or (>! p copy) (>! garbage copy)))
-             (or (>! pilot buf) (>! garbage buf))
-             (recur (<! read-channel))))
-         (doseq [p (conj passengers pilot)] (async/close! p))
-         (async/close! garbage)
-         (async/close! write-channel)
-         (log/debug "start-flight: flight to" dest-name "finished")))
+       (try
+         (log/trace "start-flight: boarding to" dest-name)
+         (let [[pilot flight-plan] (<! jetway)
+               boarding (accept-passengers jetway)]
+           (if-let [[read-channel write-channel] (<! (sockman/connect-and-accept sockman host port))]
+             (do
+               (async/pipe flight-plan write-channel false)
+               (let [first-block (<! read-channel)
+                     _ (depart this destination)   ; stop accepting new passengers after first block read
+                     passengers (<! boarding)]
+                 (log/info "start-flight: departing to" dest-name "with" (inc (count passengers)) "passengers")
+                 (loop [buf first-block]
+                   (when buf
+                     (doseq [p passengers :let [copy (<! (sockman/copy-buffer sockman buf))]]
+                       (or (>! p copy) (>! trash-chute copy)))
+                     (or (>! pilot buf) (>! trash-chute buf))
+                     (recur (<! read-channel))))
+                 (doseq [p (conj passengers pilot)] (async/close! p))
+                 (async/close! write-channel)
+                 (log/debug "start-flight: flight to" dest-name "finished")))
+             (do (log/warn "start-flight: connection failed, canceling flight to" dest-name)
+                 (async/pipe flight-plan trash-chute false)
+                 (depart this destination)
+                 (doseq [p (<! boarding)]
+                   (async/close! p))
+                 (async/close! pilot))))
+         (catch Throwable t
+           (log/error t "start-flight: aborting flight due to exception"))))
       jetway))
 
   (board
