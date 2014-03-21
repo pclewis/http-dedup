@@ -51,10 +51,10 @@
                        (~fname ~name ~@args)
                        ~(first args)))
                     (~(into [name] args)
-                     (go (or (>! ~name ~(into [(keyword fname)] args))
-                             (async/close! ~'out)))))
+                     (or (async/put! ~name ~(into [(keyword fname)] args))
+                         (async/close! ~'out))))
                   `(~(into [name] args)
-                    (go (>! ~name ~(into [(keyword fname)] args)))))))
+                    (async/put! ~name ~(into [(keyword fname)] args))))))
 
        (defn ~name ~(if ctor (second ctor) `[])
          (let [~chan_ (async/chan)]

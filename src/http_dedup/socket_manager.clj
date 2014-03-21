@@ -105,5 +105,5 @@
       (accept this out conn)
       (async/close! out))))
 
-  (return-buffer [buf] (<! (bufman/return bufman buf)))
-  (copy-buffer [out buf] (<! (bufman/copy bufman out buf))))
+  (return-buffer [buf] (bufman/return bufman buf))
+  (copy-buffer [out buf] (bufman/copy bufman out buf)))
