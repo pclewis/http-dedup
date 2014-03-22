@@ -77,7 +77,7 @@
                                                               `(let [~(second f) (rest ~msg_)]
                                                                  ~@(drop 2 f))))))
                                     (catch Throwable t
-                                      (log/error t "Exception in message handler:")))]
+                                      (log/error t "Exception in message handler:" ~msg_)))]
                              (if (map? res#)
                                (merge ~state_ res#)
                                ~state_))))
