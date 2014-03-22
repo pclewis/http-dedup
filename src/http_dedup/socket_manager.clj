@@ -64,7 +64,7 @@
                    (>! outch socket)
                    (recur))
                  (catch java.net.ConnectException e
-                   (log/error e "connector: connection failed:" socket)
+                   (log/error "connector: finishConnect failed:" socket ":" (.getMessage e))
                    (async/close! outch))))))
 
   (fn acceptor [socket outch]
@@ -82,7 +82,7 @@
        (.connect socket (InetSocketAddress. (InetAddress/getByName host) port))
        (connector socket out)
        (catch java.net.ConnectException e
-         (log/error e "connect: couldn't connect to" host ":" port)
+         (log/error "connect: connect to" host ":" port "failed:" (.getMessage e))
          (async/close! out)))))
 
   (listen
