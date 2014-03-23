@@ -1,7 +1,7 @@
 (ns http-dedup.select
   (:import [java.nio.channels Selector SelectionKey])
   (:require [clojure.core.async :as async :refer [go go-loop >! <! >!! <!!]]
-            [http-dedup.async-utils :refer [defasync thread get!!]]
+            [http-dedup.async-utils :refer [thread get!!]]
             [http-dedup.util :refer [bit-seq pre-swap!]]
             [taoensso.timbre :as log])
   (:refer-clojure :exclude [read write]))
