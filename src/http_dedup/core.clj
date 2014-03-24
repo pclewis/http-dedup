@@ -97,11 +97,13 @@
    ["-v" "--verbose" "Verbosity level"
     :id :verbosity
     :default 0
-    :assoc-fn (fn [m k _] (update-in m [k] inc))]])
+    :assoc-fn (fn [m k _] (update-in m [k] inc))]
+   ["-d" "--daemon" "Run as daemon - default if no terminal attached"
+    :default (nil? (System/console))]])
 
 (defn -main
   [& args]
-  (let [{{:keys [verbosity listen connect]} :options
+  (let [{{:keys [verbosity listen connect daemon]} :options
          summary :summary
          errs :errors} (cli/parse-opts args cli-options)]
     (if errs
@@ -112,34 +114,42 @@
                             1 :trace
                             0 :debug
                             :info))
+          (let [reader (when-not daemon (ConsoleReader.))]
+            (when-not daemon
+              (log/set-config! [:appenders :pretty] {:enabled? true :fn pretty-log/pretty-log})
+              (log/set-config! [:shared-appender-config :after-msg] #(doto reader .drawLine .flush))
+              (log/set-config! [:appenders :standard-out :enabled?] false))
 
-          (log/info "Listening on" listen " -- fowarding connections to" connect)
-          (let [server (apply run-server (into listen connect))
-                reader (ConsoleReader.)]
-            (log/set-config! [:appenders :pretty] {:enabled? true :fn pretty-log/pretty-log})
-            (log/set-config! [:shared-appender-config :after-msg] #(doto reader .drawLine .flush))
-            (log/set-config! [:appenders :standard-out :enabled?] false)
-            (.addCompleter reader (ArgumentCompleter.
-                               [(StringsCompleter. (map str '(quit bufman sockman atc select
-                                                                     repl level mute unmute)))
-                                (StringsCompleter. (map str (all-ns)))]))
-            (loop []
-              (when-let [line (.readLine reader "http-dedup> ")]
-                (let [[cmd & args] (clojure.string/split line #"\s+")]
-                  (case cmd
-                    ("quit" "") nil
-                    ("bufman" "sockman" "atc" "select") (async/>!! server (into [(keyword cmd)] args))
-                    ("repl") (clojure.main/repl :read (fn [_ breaker]
-                                                        (if-let [line (.readLine reader "repl> ")]
-                                                          (read-string line)
-                                                          breaker))
-                                                :prompt #())
-                    ("level") (log/set-level! (keyword (first args)))
-                    ("mute") (log/set-config! [:ns-blacklist]
-                                              (conj (:ns-blacklist @log/config) (first args)))
-                    ("unmute") (log/set-config! [:ns-blacklist]
-                                                (remove (set args) (:ns-blacklist @log/config)))
-                    (println "Unrecognized command: " cmd))
-                  (when-not (= cmd "quit") (recur)))))
-            (.shutdown reader)
-            (async/close! server))))))
+            (let [server (apply run-server (into listen connect))]
+              (log/info "Listening on" listen " -- fowarding connections to" connect)
+
+              (if daemon
+                (do
+                  (log/set-config! [:appenders :standard-out :fmt-output-opts :nofonts?] true)
+                  (.close System/in)
+                  (async/<!! server))
+                (do
+                  (.addCompleter reader (ArgumentCompleter.
+                                         [(StringsCompleter. (map str '(quit bufman sockman atc select
+                                                                             repl level mute unmute)))
+                                          (StringsCompleter. (map str (all-ns)))]))
+                  (loop []
+                    (when-let [line (.readLine reader "http-dedup> ")]
+                      (let [[cmd & args] (clojure.string/split line #"\s+")]
+                        (case cmd
+                          ("quit" "") nil
+                          ("bufman" "sockman" "atc" "select") (async/>!! server (into [(keyword cmd)] args))
+                          ("repl") (clojure.main/repl :read (fn [_ breaker]
+                                                              (if-let [line (.readLine reader "repl> ")]
+                                                                (read-string line)
+                                                                breaker))
+                                                      :prompt #())
+                          ("level") (log/set-level! (keyword (first args)))
+                          ("mute") (log/set-config! [:ns-blacklist]
+                                                    (conj (:ns-blacklist @log/config) (first args)))
+                          ("unmute") (log/set-config! [:ns-blacklist]
+                                                      (remove (set args) (:ns-blacklist @log/config)))
+                          (println "Unrecognized command: " cmd))
+                        (when-not (= cmd "quit") (recur)))))
+                  (.shutdown reader)
+                  (async/close! server)))))))))
