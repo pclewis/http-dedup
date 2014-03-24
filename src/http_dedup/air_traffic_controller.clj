@@ -19,7 +19,8 @@
 
 (defn start-flight [{:keys [sockman host port trash-chute]} atc destination]
   (let [jetway (async/chan)      ; receives [channel [buffers]]
-        dest-name (first (clojure.string/split-lines destination))]
+        dest-name (first (clojure.string/split-lines destination))
+        start (System/currentTimeMillis)]
     (go
      (try
        (log/trace "start-flight: boarding to" dest-name)
@@ -29,9 +30,10 @@
            (do
              (async/pipe flight-plan write-channel false)
              (let [first-block (<! read-channel)
+                   first-block-time (System/currentTimeMillis)
                    _ (depart atc destination) ; stop accepting new passengers after first block read
                    passengers (<! boarding)]
-               (log/info "start-flight: departing to" dest-name "with" (inc (count passengers)) "passengers")
+               (log/debug "start-flight: departing to" dest-name "with" (inc (count passengers)) "passengers")
                (loop [buf first-block]
                  (when buf
                    (doseq [p passengers :let [copy (<! (sockman/copy-buffer sockman buf))]]
@@ -40,6 +42,12 @@
                    (recur (<! read-channel))))
                (doseq [p (conj passengers pilot)] (async/close! p))
                (async/close! write-channel)
+               (let [end (System/currentTimeMillis)]
+                 (log/infof "\"%s\" - %d passengers - %dms total (%dms waiting for response)"
+                            dest-name
+                            (inc (count passengers))
+                            (- end start)
+                            (- end first-block-time)))
                (log/debug "start-flight: flight to" dest-name "finished")))
            (do (log/warn "start-flight: connection failed, canceling flight to" dest-name)
                (async/pipe flight-plan trash-chute false)
