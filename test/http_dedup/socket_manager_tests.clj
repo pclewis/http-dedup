@@ -21,10 +21,9 @@
 (deftest socket-manager-test
   (let [incoming-ch (sockman/listen *sockman* nil port)
         _ (<!! (async/timeout 5)) ; sometimes listen isn't ready yet
-        client->server (<!! (sockman/connect *sockman* nil port))
-        server->client (<!! incoming-ch)
-        [s<c s>c] (<!! (sockman/accept *sockman* server->client))
-        [c<s c>s] (<!! (sockman/accept *sockman* client->server))]
+        outgoing-ch (sockman/connect *sockman* nil port)
+        [s<c s>c] (<!! incoming-ch)
+        [c<s c>s] (<!! outgoing-ch)]
     (>!! s>c (str-to-bytebuf "Hello world"))
     (is (= "Hello world" (bytebuf-to-str (<!! c<s))))))
 

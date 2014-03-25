@@ -1,5 +1,5 @@
 (ns http-dedup.socket-manager
-  (:import [java.nio.channels SocketChannel ServerSocketChannel]
+  (:import [java.nio.channels SocketChannel ServerSocketChannel ClosedChannelException]
            [java.net InetAddress InetSocketAddress])
   (:require [http-dedup
              [async-utils :refer :all]
@@ -10,73 +10,110 @@
             [taoensso.timbre :as log]))
 
 (defactor SocketManager
-  (connect [host port])
-  (listen [host port])
-  (accept [socket])
-  (connect-and-accept [host port])
-  (return-buffer [buf])
-  (copy-buffer [buf]))
+  "core.async friendly methods for interacting with selector.
+   Connections are emitted as [read-channel write-channel].
+
+   The read-channel will receive a ByteBuffer every time data arrives on the socket, and close
+   when the connection closes. The ByteBuffer must be returned by writing it to another socket
+   or calling return-buffer.
+
+   ByteBuffers sent to the write-channel will be written to the socket and automatically reclaimed.
+   The connection will be closed when the write-channel is closed, after all writes are finished."
+
+  (connect
+   "Connect to a given host/port. Emits [read-channel write-channel] when connection is finished, or closes on error."
+   [host port])
+
+  (listen
+   "Bind to given host/port and emit [read-channel write-channel] for each accepted connection."
+   [host port])
+
+  (copy-buffer
+   [buf]
+   "Create a copy of a buffer. Buffers will not be reused until all copies have been returned.")
+
+  (return-buffer
+   [buf]
+   "Return a buffer without writing it to a socket."))
 
 (defn- writer [{:keys [bufman select]} socket]
   (let [inch (async/chan 64)]
-    (go-loop []
-             (if-let [buf (<! inch)]
-               (do (log/trace socket "received a buffer to write" buf)
-                   (while (.hasRemaining buf)
-                     (when-not (and (<! (select/write select socket))
-                                    (< 0 (try (.write socket buf)
-                                              (catch java.nio.channels.ClosedChannelException _ -1))))
-                       (log/debug "write: socket is closed, discarding buffer:" socket)
-                       (.limit buf 0)))
-                   (bufman/return bufman buf)
-                   (recur))
-               (do (log/debug "write: closing connection" socket)
-                   (select/close select socket))))
+    (go
+     (try
+       (loop []
+         (when-let [buf (<! inch)]
+           (log/trace socket "received a buffer to write" buf)
+           (while (.hasRemaining buf)
+             (when-not (and (<! (select/write select socket))
+                            (< 0 (try (.write socket buf) (catch ClosedChannelException _ -1))))
+               (log/debug "write: socket is closed, discarding buffer:" socket)
+               (.limit buf 0)))
+           (bufman/return bufman buf)
+           (recur)))
+       (finally
+         (log/debug "write: closing connection" socket)
+         (select/close select socket))))
     inch))
 
 (defn- reader [{:keys [bufman select]} socket wch]
   (let [outch (async/chan 64)]
-    (go-loop []
-             (if (<! (select/read select socket))
-               (let [buf (<! (bufman/request bufman))
-                     n-read (try (.read socket buf)
-                                 (catch java.nio.channels.ClosedChannelException _
-                                   -1))]
-                 (log/trace "Received" n-read "bytes on socket" buf)
-                 (if (> 0 n-read)
-                   (do (log/debug "read: closing connection" socket)
-                       (bufman/return bufman buf)
-                       (async/close! outch)
-                       (async/close! wch)
-                       (select/close select socket))
-                   (do (.flip buf)
-                       (or (>! outch buf)
-                           (bufman/return bufman buf))
-                       (recur))))
-               (do (log/debug "read: connection closed")
-                   (async/close! outch)
-                   (async/close! wch))))
+    (go
+     (try
+       (loop []
+         (if (<! (select/read select socket))
+           (let [buf (<! (bufman/request bufman))
+                 n-read (try (.read socket buf) (catch ClosedChannelException _ -1))]
+             (log/trace "Received" n-read "bytes on socket" buf)
+             (if (> 0 n-read)
+               (bufman/return bufman buf)
+               (do (.flip buf)
+                   (or (>! outch buf)
+                       (bufman/return bufman buf))
+                   (recur))))))
+       (finally
+         (log/debug "read: connection closed")
+         (async/close! outch)
+         (async/close! wch)
+         (select/close select socket))))
     outch))
 
-(defn- connector [{:keys [select]} socket outch]
-  (go-loop []
-           (when (<! (select/connect select socket))
-             (try
-               (if (.finishConnect socket)
-                 (>! outch socket)
-                 (recur))
-               (catch java.net.ConnectException e
-                 (log/error "connector: finishConnect failed:" socket ":" (.getMessage e))
-                 (async/close! outch))))))
+(defn- send-channels [{:keys [select] :as this} out socket]
+  (let [wch (writer this socket)
+        rch (reader this socket wch)]
+    (if (async/put! out [rch wch])
+      true
+      (do (log/error "send-channels: nobody received created channels, destroying them and closing socket!")
+          (async/close! wch)
+          (select/close select socket)
+          false))))
 
-(defn- acceptor [{:keys [select]} socket outch]
-  (go-loop []
-           (if (<! (select/accept select socket))
-             (let [new-sock (.accept socket)]
-               (.configureBlocking new-sock false)
-               (>! outch new-sock)
-               (recur))
-             (log/warn "acceptor closing.."))))
+(defn- connector [{:keys [select] :as this} socket outch]
+  (go
+   (try
+     (loop []
+       (when (<! (select/connect select socket))
+         (try
+           (if (.finishConnect socket)
+             (send-channels this outch socket)
+             (recur))
+           (catch java.net.ConnectException e
+             (log/warn "connector: finishConnect failed:" socket ":" (.getMessage e))))))
+     (finally
+       (async/close! outch)))))
+
+(defn- acceptor [{:keys [select] :as this} socket outch]
+  (go
+   (try
+     (loop []
+       (when (<! (select/accept select socket))
+         (let [new-sock (.accept socket)]
+           (.configureBlocking new-sock false)
+           (if (send-channels this outch new-sock)
+             (recur)
+             (log/error "acceptor: channel closed, no longer accepting connections.")))))
+     (finally
+       (select/close select socket)
+       (async/close! outch)))))
 
 (defrecord Sockman [select bufman this-actor]
   SocketManager
@@ -97,20 +134,6 @@
       (.bind (.socket socket) (InetSocketAddress. (InetAddress/getByName host) port))
       (acceptor this socket out))
     nil) ; don't accidentally return channel
-
-  (accept
-    [this out socket]
-    (go (let [wch (writer this socket)
-              rch (reader this socket wch)]
-          (>! out [rch wch])))
-    nil) ; don't need to wait
-
-  (connect-and-accept
-    [this out host port]
-    (go (if-let [conn (<! (connect this-actor host port))]
-          (accept this-actor out conn)
-          (async/close! out)))
-    nil) ; deadlock if wait..
 
   (return-buffer [this out buf] (bufman/return bufman out buf) nil)
   (copy-buffer [this out buf] (bufman/copy bufman out buf) nil))
