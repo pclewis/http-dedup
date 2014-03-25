@@ -43,10 +43,11 @@
                (doseq [p (conj passengers pilot)] (async/close! p))
                (async/close! write-channel)
                (let [end (System/currentTimeMillis)]
-                 (log/infof "\"%s\" - %d passengers - %dms total (%dms waiting for response)"
+                 (log/infof "\"%s\" - %d passengers - %dms total (%dms waiting, %dms sending)"
                             dest-name
                             (inc (count passengers))
                             (- end start)
+                            (- first-block-time start)
                             (- end first-block-time)))
                (log/debug "start-flight: flight to" dest-name "finished")))
            (do (log/warn "start-flight: connection failed, canceling flight to" dest-name)
