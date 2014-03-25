@@ -1,17 +1,13 @@
 (ns http-dedup.core
   (:gen-class)
-  (:import [jline.console ConsoleReader]
-           [jline.console.completer ArgumentCompleter StringsCompleter])
   (:require [clojure.core.async :as async :refer [go go-loop <! >!]]
             [clojure.tools.cli :as cli]
             [taoensso.timbre :as log]
-            [http-dedup
-             [pretty-log :as pretty-log]
+            [http-dedup interactive pretty-log
              [buffer-manager :as bufman]
              [socket-manager :as sockman]
              [air-traffic-controller :as atc]
              [select :as select]
-             [async-utils :refer [go-loop-<!]]
              [util :refer [bytebuf-to-str str-to-bytebuf]]]))
 
 (defmethod clojure.core/print-method Throwable [t ^java.io.Writer writer]
@@ -114,42 +110,14 @@
                             1 :trace
                             0 :debug
                             :info))
-          (let [reader (when-not daemon (ConsoleReader.))]
-            (when-not daemon
-              (log/set-config! [:appenders :pretty] {:enabled? true :fn pretty-log/pretty-log})
-              (log/set-config! [:shared-appender-config :after-msg] #(doto reader .drawLine .flush))
-              (log/set-config! [:appenders :standard-out :enabled?] false))
-
-            (let [server (apply run-server (into listen connect))]
-              (log/info "Listening on" listen " -- fowarding connections to" connect)
-
-              (if daemon
-                (do
-                  (log/set-config! [:appenders :standard-out :fmt-output-opts :nofonts?] true)
-                  (.close System/in)
+          (if daemon
+            (log/set-config! [:appenders :standard-out :fmt-output-opts :nofonts?] true)
+            (do (log/set-config! [:appenders :pretty] {:enabled? true :fn http-dedup.pretty-log/pretty-log})
+                (log/set-config! [:appenders :standard-out :enabled?] false)))
+          (let [server (apply run-server (into listen connect))]
+            (log/info "Listening on" listen " -- forwarding connections to" connect)
+            (if daemon
+              (do (.close System/in)
                   (async/<!! server))
-                (do
-                  (.addCompleter reader (ArgumentCompleter.
-                                         [(StringsCompleter. (map str '(quit bufman sockman atc select
-                                                                             repl level mute unmute)))
-                                          (StringsCompleter. (map str (all-ns)))]))
-                  (loop []
-                    (when-let [line (.readLine reader "http-dedup> ")]
-                      (let [[cmd & args] (clojure.string/split line #"\s+")]
-                        (case cmd
-                          ("quit" "") nil
-                          ("bufman" "sockman" "atc" "select") (async/>!! server (into [(keyword cmd)] args))
-                          ("repl") (clojure.main/repl :read (fn [_ breaker]
-                                                              (if-let [line (.readLine reader "repl> ")]
-                                                                (read-string line)
-                                                                breaker))
-                                                      :prompt #())
-                          ("level") (log/set-level! (keyword (first args)))
-                          ("mute") (log/set-config! [:ns-blacklist]
-                                                    (conj (:ns-blacklist @log/config) (first args)))
-                          ("unmute") (log/set-config! [:ns-blacklist]
-                                                      (remove (set args) (:ns-blacklist @log/config)))
-                          (println "Unrecognized command: " cmd))
-                        (when-not (= cmd "quit") (recur)))))
-                  (.shutdown reader)
-                  (async/close! server)))))))))
+              (do (http-dedup.interactive/session server)
+                  (async/close! server))))))))
