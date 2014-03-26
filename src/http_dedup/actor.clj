@@ -52,17 +52,16 @@
 
 (defn run-actor [actor inst]
   (let [mailbox (:mailbox actor)]
-    (go
-     (loop [state inst]
-       (when-let [[method & args :as msg] (<! mailbox)]
-         (log/trace actor "got message:" msg)
-         (let [result (try (dispatch-message actor state method args)
-                              (catch Throwable t
-                                (log/error t "error handling message" {:msg msg :actor actor :state state})
-                                {}))
-               result (if (satisfies? async-protos/ReadPort result)
-                          (<! result)
-                          result)]
-           (recur (if (map? result)
-                    (merge state result)
-                    state))))))))
+    (go-loop [state inst]
+      (when-let [[method & args :as msg] (<! mailbox)]
+        (log/trace actor "got message:" msg)
+        (let [result (try (dispatch-message actor state method args)
+                          (catch Throwable t
+                            (log/error t "error handling message" {:msg msg :actor actor :state state})
+                            {}))
+              result (if (satisfies? async-protos/ReadPort result)
+                       (<! result)
+                       result)]
+          (recur (if (map? result)
+                   (merge state result)
+                   state)))))))

@@ -38,12 +38,12 @@
 (defn read-request [read-channel]
   (go-loop [s nil
             bufs []]
-           (when-let [buf (<! read-channel)]
-             (let [ns (str s (bytebuf-to-str buf))
-                   i (.indexOf ns "\r\n\r\n")]
-               (if (>= i 0)
-                 (prepare-request (subs ns 0 i) (conj bufs buf))
-                 (recur ns (conj bufs buf)))))))
+    (when-let [buf (<! read-channel)]
+      (let [ns (str s (bytebuf-to-str buf))
+            i (.indexOf ns "\r\n\r\n")]
+        (if (>= i 0)
+          (prepare-request (subs ns 0 i) (conj bufs buf))
+          (recur ns (conj bufs buf)))))))
 
 (defn handle-incoming [atc read-channel write-channel]
   (go
@@ -68,16 +68,16 @@
         (recur)))
 
     (go-loop []
-             (if-let [[msg & args] (<! controlch)]
-               (do (case msg
-                     :bufman (>! bufman [:debug-state])
-                     :sockman (>! sockman [:debug-state])
-                     :atc (>! atc [:debug-state])
-                     :select (select/debug-select-thread select)
-                     nil)
-                   (recur))
-               (do (async/close! sockman)
-                   (async/close! atc))))
+      (if-let [[msg & args] (<! controlch)]
+        (do (case msg
+              :bufman (>! bufman [:debug-state])
+              :sockman (>! sockman [:debug-state])
+              :atc (>! atc [:debug-state])
+              :select (select/debug-select-thread select)
+              nil)
+            (recur))
+        (do (async/close! sockman)
+            (async/close! atc))))
     controlch))
 
 (def cli-options
