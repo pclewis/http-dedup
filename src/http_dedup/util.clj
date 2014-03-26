@@ -23,3 +23,14 @@
 (defn bytebuf-to-str [bb] (.toString (.decode ASCII (.duplicate bb))))
 
 (defn str-to-bytebuf [s] (.encode ASCII s))
+
+(defn drop-bytes!
+  "Modify a sequence of buffers so that the first n bytes are removed.
+   If n is bigger than the first buffer, it will have .remaining=0, and so on."
+  [n bufs]
+  (when-let [[buf & rest] (seq bufs)]
+    (let [size (.remaining buf)]
+      (if (> n size)
+        (do (.position buf (.limit buf))
+            (recur (- n size) rest))
+        (.position buf (+ (.position buf) n))))))
