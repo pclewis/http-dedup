@@ -61,13 +61,12 @@
         sockman (sockman/socket-manager select bufman)
         connch (sockman/listen sockman listen-addr listen-port)
         atc (atc/air-traffic-controller sockman connect-addr connect-port)]
-    (go-loop
-     []
-     (if-let [socket (<! connch)]
-       (do
-         (apply handle-incoming atc (<! (sockman/accept sockman socket)))
-         (recur))
-       (log/warn "Acceptor shutting down")))
+
+    (go-loop []
+      (when-let [[rch wch] (<! connch)]
+        (handle-incoming atc rch wch)
+        (recur)))
+
     (go-loop []
              (if-let [[msg & args] (<! controlch)]
                (do (case msg

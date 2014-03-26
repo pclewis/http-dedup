@@ -26,7 +26,7 @@
        (log/trace "start-flight: boarding to" dest-name)
        (let [[pilot flight-plan] (<! jetway)
              boarding (accept-passengers jetway trash-chute)]
-         (if-let [[read-channel write-channel] (<! (sockman/connect-and-accept sockman host port))]
+         (if-let [[read-channel write-channel] (<! (sockman/connect sockman host port))]
            (do
              (async/pipe flight-plan write-channel false)
              (let [first-block (<! read-channel)
