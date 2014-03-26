@@ -17,6 +17,23 @@
   (return-buffer [buf])
   (copy-buffer [buf]))
 
+(defn- write-socket [socket buf]
+  (try (.write socket buf)
+       (catch java.io.IOException _ -1))) ; ClosedChannelException, broken pipe, etc
+
+(defn- read-socket [socket buf]
+  (try (.read socket buf)
+       (catch java.io.IOException _ -1)))
+
+(defn- finish-connect [socket outch]
+  (try (when (.finishConnect socket)
+         (async/put! outch socket)
+         true)
+       (catch java.io.IOException e ; SocketException, ConnectException
+         (log/error "finishConnect failed:" socket ":" (.getMessage e))
+         (async/close! outch)
+         true)))
+
 (defn- writer [{:keys [bufman select]} socket]
   (let [inch (async/chan 64)]
     (go-loop []
@@ -24,10 +41,10 @@
                (do (log/trace socket "received a buffer to write" buf)
                    (while (.hasRemaining buf)
                      (when-not (and (<! (select/write select socket))
-                                    (< 0 (try (.write socket buf)
-                                              (catch java.nio.channels.ClosedChannelException _ -1))))
+                                    (< 0 (write-socket socket buf)))
                        (log/debug "write: socket is closed, discarding buffer:" socket)
-                       (.limit buf 0)))
+                       (.limit buf 0)
+                       (async/close! inch)))
                    (bufman/return bufman buf)
                    (recur))
                (do (log/debug "write: closing connection" socket)
@@ -39,9 +56,7 @@
     (go-loop []
              (if (<! (select/read select socket))
                (let [buf (<! (bufman/request bufman))
-                     n-read (try (.read socket buf)
-                                 (catch java.nio.channels.ClosedChannelException _
-                                   -1))]
+                     n-read (read-socket socket buf)]
                  (log/trace "Received" n-read "bytes on socket" buf)
                  (if (> 0 n-read)
                    (do (log/debug "read: closing connection" socket)
@@ -61,13 +76,8 @@
 (defn- connector [{:keys [select]} socket outch]
   (go-loop []
            (when (<! (select/connect select socket))
-             (try
-               (if (.finishConnect socket)
-                 (>! outch socket)
-                 (recur))
-               (catch java.net.ConnectException e
-                 (log/error "connector: finishConnect failed:" socket ":" (.getMessage e))
-                 (async/close! outch))))))
+             (if-not (finish-connect socket outch)
+               (recur)))))
 
 (defn- acceptor [{:keys [select]} socket outch]
   (go-loop []
