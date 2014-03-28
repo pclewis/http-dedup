@@ -48,12 +48,15 @@
                             0 :debug
                             :info))
           (if daemon
-            (log/set-config! [:appenders :standard-out :fmt-output-opts :nofonts?] true)
-            (do (log/set-config! [:appenders :pretty] {:enabled? true :fn http-dedup.pretty-log/pretty-log})
+            (log/set-config! [:appenders :standard-out :fmt-output-opts
+                              :nofonts?] true)
+            (do (log/set-config! [:appenders :pretty]
+                                 {:enabled? true
+                                  :fn http-dedup.pretty-log/pretty-log})
                 (log/set-config! [:appenders :standard-out :enabled?] false)))
-          (let [atc (atc/air-traffic-controller config)]
+          (let [control (atc/run-server config)]
             (if daemon
               (do (.close System/in)
-                  (async/<!! atc))
-              (do (http-dedup.interactive/session atc)
-                  (async/close! atc))))))))
+                  (async/<!! control))
+              (do (http-dedup.interactive/session control)
+                  (async/close! control))))))))

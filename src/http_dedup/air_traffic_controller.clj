@@ -1,6 +1,6 @@
 (ns http-dedup.air-traffic-controller
-  (:require [clojure.core.async :as async :refer [go go-loop >! <! alt!]]
-            [http-dedup.async-utils :refer :all]
+  (:require [clojure.core.async :as async :refer [go go-loop >! <! alt! pipe]]
+            [http-dedup.async-utils :as au]
             [http-dedup.socket-manager :as sockman]
             [http-dedup.buffer-manager :as bufman]
             [http-dedup.select :as select]
@@ -8,77 +8,82 @@
             [http-dedup.util :refer [bytebuf-to-str str-to-bytebuf drop-bytes!]]
             [taoensso.timbre :as log]))
 
-; how to take a metaphor too far
-
 (defactor AirTrafficController
-  (board [destination passenger bags])
-  (depart [destination]))
+  (board
+   "Join a flight, creating one if it doesn't exist.
+    Emits true if a new flight was created."
+   [destination passenger])
 
-(defn- accept-passengers [jetway trash-chute]
-  (async/reduce (fn [ps [p bs]]
-                  (async/pipe bs trash-chute false)
-                  (conj ps p))
-                [] jetway))
+  (depart
+   "Stop accepting passengers for destination and emit final list."
+   [destination]))
 
-(defn- start-flight [{:keys [sockman config trash-chute actor]} destination]
-  (let [jetway (async/chan)      ; receives [channel [buffers]]
-        dest-name (first (clojure.string/split-lines destination))
-        start (System/currentTimeMillis)]
-    (go
-     (try
-       (log/trace "start-flight: boarding to" dest-name)
-       (let [[pilot flight-plan] (<! jetway)
-             boarding (accept-passengers jetway trash-chute)]
-         (if-let [[read-channel write-channel] (<! (apply sockman/connect sockman (:connect config)))]
-           (do
-             (async/pipe flight-plan write-channel false)
-             (let [first-block (<! read-channel)
-                   first-block-time (System/currentTimeMillis)
-                   _ (depart actor destination) ; stop accepting new passengers after first block read
-                   passengers (<! boarding)]
-               (log/debug "start-flight: departing to" dest-name "with" (inc (count passengers)) "passengers")
-               (loop [buf first-block]
-                 (when buf
-                   (doseq [p passengers :let [copy (<! (sockman/copy-buffer sockman buf))]]
-                     (or (>! p copy) (>! trash-chute copy)))
-                   (or (>! pilot buf) (>! trash-chute buf))
-                   (recur (<! read-channel))))
-               (doseq [p (conj passengers pilot)] (async/close! p))
-               (async/close! write-channel)
-               (let [end (System/currentTimeMillis)]
-                 (log/infof "\"%s\" - %d passengers - %dms total (%dms waiting, %dms sending)"
-                            dest-name
-                            (inc (count passengers))
-                            (- end start)
-                            (- first-block-time start)
-                            (- end first-block-time)))
-               (log/debug "start-flight: flight to" dest-name "finished")))
-           (do (log/warn "start-flight: connection failed, canceling flight to" dest-name)
-               (async/pipe flight-plan trash-chute false)
-               (depart actor destination)
-               (doseq [p (<! boarding)]
-                 (async/close! p))
-               (async/close! pilot))))
-       (catch Throwable t
-         (log/error t "start-flight: aborting flight due to exception"))))
-    jetway))
-
-(defrecord ATC [config flights sockman trash-chute actor]
+(defrecord ATC [flights]
   AirTrafficController
-  (board [this out destination passenger bags]
-    (let [flight (or (get flights destination)
-                     (start-flight this destination))]
-      (async/put! flight [passenger bags]) ; no race condition: only we close flight channel
-      {:flights (assoc flights destination flight)}))
+  (board [this out destination passenger]
+    (let [flight (or (get flights destination) [])]
+      (when (empty? flight) (async/put! out true))
+      (async/close! out)
+      {:flights (assoc flights destination (conj flight passenger))}))
 
   (depart [this out destination]
-    (async/close! (get flights destination))
+    (async/put! out (get flights destination))
     {:flights (dissoc flights destination)} ))
+
+(defn air-traffic-controller []
+  (let [actor (AirTrafficControllerActor. (async/chan))]
+    (run-actor actor (ATC. {}))
+    actor))
+
+(defn- server-mux [sockman read-channel write-channels]
+  (go
+    (loop []
+      (when-let [buffer (<! read-channel)]
+        (try
+          ;; can't copy directly onto channel because we need to make sure the
+          ;; copy is done before we fall out and close channel. also we want
+          ;; to park here when a client is slow, instead of buffering data via
+          ;; put! until we hit the limit and crash
+          (doseq [ch write-channels
+                  :let [copy (<! (sockman/copy-buffer sockman buffer))]]
+            (or (>! ch copy) (sockman/return-buffer sockman copy)))
+          (finally (sockman/return-buffer sockman buffer)))
+        (recur)))))
+
+(defn- log-request [request start first-block-time n-passengers]
+  (let [end (System/currentTimeMillis)]
+    (log/infof "[%2d] [%5dms] [%5dms] [%5dms] | %s"
+               n-passengers
+               (- end start)
+               (- first-block-time start)
+               (- end first-block-time)
+               (first (clojure.string/split-lines request)))))
+
+(defn- start-flight [atc sockman request pilot-read host port]
+  (go
+    (let [start (System/currentTimeMillis)]
+      (if-let [server (<! (sockman/connect sockman host port))]
+        (do (pipe pilot-read (:write server) false)
+            (let [first-block (<! (:read server))
+                  first-block-time (System/currentTimeMillis)
+                  passengers (<! (depart atc request))]
+              (try
+                (when first-block
+                  (<! (server-mux sockman
+                                  (au/concat (async/to-chan [first-block])
+                                             (:read server))
+                                  passengers)))
+                (log-request request start first-block-time (count passengers))
+                (finally
+                  (doall (map async/close! passengers))))))
+        (do (sockman/return-buffers sockman pilot-read)
+            (doall (map async/close! (<! (depart atc request))))
+            (log/warn "connection failed, flight canceled"))))))
 
 (defn- prepare-request
   "Change Connection: keep-alive to Connection: close and manage buffers
-   appropriately. Necessary because the buffers may have already started
-   reading the body of the request, which we need to preserve."
+   appropriately. Necessary because the buffers may have already started reading
+   the body of the request, which we need to preserve."
   [req bufs]
   (drop-bytes! (count req) bufs)
   (let [new-req (clojure.string/replace-first req
@@ -109,28 +114,30 @@
       (do (log/warn "Connection closed before request received")
           [nil bufs]))))
 
-(defn- handle-incoming [atc [read-channel write-channel]]
+(defn- handle-incoming [atc sockman host port connection]
   (go
-    (when-let [[request bufs] (<! (read-request read-channel 60000))]
+    (when-let [[request bufs] (<! (read-request (:read connection) 60000))]
       (if request
         (let [[request bufs] (prepare-request request bufs)
-              refilled-read-channel (async/chan)]
-          (async/onto-chan refilled-read-channel bufs false)
-          (async/pipe read-channel refilled-read-channel)
-          (board atc request write-channel refilled-read-channel))
-        (async/onto-chan (:trash-chute atc) bufs)))))
+              read-channel (au/concat (async/to-chan bufs) (:read connection))]
+          (when (<! (board atc request (:write connection)))
+            (start-flight atc sockman request read-channel host port)))
+        (sockman/return-buffers sockman bufs)))))
 
-(defn air-traffic-controller [config]
-  (let [actor (AirTrafficControllerActor. (async/chan))
-        bufman (bufman/buffer-manager (:max-buffers config) (:buffer-size config))
+(defn run-server [config]
+  (let [bufman (bufman/buffer-manager (:max-buffers config)
+                                      (:buffer-size config))
         select (select/select)
         sockman (sockman/socket-manager select bufman)
-        trash-chute (async/map> #(vector :return-buffer nil %) sockman)]
-    (log/info "Listening on" (:listen config) "-- forwarding to" (:connect config))
-    (drain (apply sockman/listen sockman (:listen config))
-           handle-incoming actor)
-    (go
-     (<! (run-actor actor (ATC. config {} sockman trash-chute actor)))
-     (async/close! trash-chute) ; note: also closes sockman
-     (async/close! sockman))
-    actor))
+        atc (air-traffic-controller)]
+    (log/infof "Listening on %s:%d -- forwarding to %s:%d"
+               (or (first (:listen config)) "localhost")
+               (second (:listen config))
+               (or (first (:connect config)) "localhost")
+               (second (:connect config)))
+    (au/drain (apply sockman/listen sockman (:listen config))
+              handle-incoming atc sockman
+              (first (:connect config))
+              (second (:connect config)))
+    (async/chan) ;FIXME
+    ))

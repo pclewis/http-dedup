@@ -2,16 +2,17 @@
   (:import [java.nio.channels SocketChannel ServerSocketChannel]
            [java.net InetAddress InetSocketAddress])
   (:require [http-dedup
-             [async-utils :refer :all]
+             [async-utils :as au]
              [select :as select]
              [buffer-manager :as bufman]
              [actor :refer [defactor run-actor]]]
             [clojure.core.async :as async :refer [go go-loop >! <!]]
             [taoensso.timbre :as log]))
 
+(defrecord Connection [read write])
+
 (defactor SocketManager
   "core.async friendly methods for interacting with selector.
-   Connections are emitted as [read-channel write-channel].
 
    The read-channel will receive a ByteBuffer every time data arrives on the
    socket, and close when the connection closes. The ByteBuffer must be returned
@@ -22,13 +23,12 @@
    write-channel is closed, after all writes are finished."
 
   (connect
-   "Connect to a given host/port. Emits [read-channel write-channel] when
-    connection is finished, or closes on error."
+   "Connect to a given host/port. Emits Connection when finished, or closes on
+    error."
    [host port])
 
   (listen
-   "Bind to given host/port and emit [read-channel write-channel] for each
-    accepted connection."
+   "Bind to given host/port and emit accepted Connections."
    [host port])
 
   (copy-buffer
@@ -38,7 +38,11 @@
 
   (return-buffer
    [buf]
-   "Return a buffer without writing it to a socket."))
+   "Return a buffer without writing it to a socket.")
+
+  (return-buffers
+   [coll-or-ch]
+   "Return all buffers from a collection or channel."))
 
 (defmacro safe-io
   "Log and return -1 if body throws an IOException."
@@ -93,7 +97,7 @@
 (defn- send-channels [{:keys [select] :as this} out socket]
   (let [wch (writer this socket)
         rch (reader this socket wch)]
-    (if (async/put! out [rch wch])
+    (if (async/put! out (Connection. rch wch))
       true
       (do (log/error "send-channels: nobody received created channels,"
                      "destroying them and closing socket!")
@@ -151,6 +155,15 @@
              (InetSocketAddress. (InetAddress/getByName host) port))
       (acceptor this socket out))
     nil) ; don't accidentally return channel
+
+  (return-buffers
+    [this out coll-or-ch]
+    (cond
+     (coll? coll-or-ch) (doall (map #(bufman/return bufman out %) coll-or-ch))
+     (au/readable? coll-or-ch) (async/pipe coll-or-ch
+                                           (async/map> #(vector :return out %)
+                                                       bufman)
+                                           false)))
 
   (return-buffer [this out buf] (bufman/return bufman out buf) nil)
   (copy-buffer [this out buf] (bufman/copy bufman out buf) nil))

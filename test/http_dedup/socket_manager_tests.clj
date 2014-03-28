@@ -9,27 +9,21 @@
 (declare ^:dynamic *sockman*)
 
 (defn sockman-fixture [f]
-  (binding [*sockman* (sockman/socket-manager (select/select) (bufman/buffer-manager 16 1024))]
+  (binding [*sockman* (sockman/socket-manager (select/select)
+                                              (bufman/buffer-manager 16 1024))]
     (try
       (f)
       (finally (async/close! *sockman*)))))
 
 (use-fixtures :each sockman-fixture)
 
-(def port 65432) ; should use an auto-assigned port, but the design doesn't really allow it
-
 (deftest socket-manager-test
-  (let [incoming-ch (sockman/listen *sockman* nil port)
+  (let [port (+ (- 0x10000 1000) (rand-int 1000))
+        ; ^ sucks but design doesn't allow for a real ephemeral port
+        incoming-ch (sockman/listen *sockman* nil port)
         _ (<!! (async/timeout 5)) ; sometimes listen isn't ready yet
         outgoing-ch (sockman/connect *sockman* nil port)
-        [s<c s>c] (<!! incoming-ch)
-        [c<s c>s] (<!! outgoing-ch)]
-    (>!! s>c (str-to-bytebuf "Hello world"))
-    (is (= "Hello world" (bytebuf-to-str (<!! c<s))))))
-
-(comment
-  (run-tests 'http-dedup.socket-manager-tests)
-
-  (taoensso.timbre/set-level! :trace)
-
-  )
+        server (<!! incoming-ch)
+        client (<!! outgoing-ch)]
+    (>!! (:write server) (str-to-bytebuf "Hello world"))
+    (is (= "Hello world" (bytebuf-to-str (<!! (:read client)))))))
