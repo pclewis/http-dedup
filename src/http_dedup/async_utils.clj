@@ -24,6 +24,14 @@
        (async/alt!! chan ([v] v) :default none)
        (async/alt!! chan ([v] v) (async/timeout timeout) none))))
 
+(defmacro get!
+  ([chan] `(get! ~chan false 0))
+  ([chan none] `(get! ~chan ~none 0))
+  ([chan none timeout]
+     (if (= 0 timeout)
+       `(async/alt! ~chan ([v#] v#) :default ~none)
+       `(async/alt! ~chan ([v#] v#) (async/timeout ~timeout) ~none))))
+
 (defmacro go-loop-<!
   "A loop that will take items from ch and bind them to binding.
    Will loop until the channel is closed."
