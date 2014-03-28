@@ -49,8 +49,8 @@
   [& body]
   `(try ~@body
        (catch java.io.IOException e#
-         (log/warnf "%s failed: %s"
-                    ~(str body) (.getMessage e#))
+         (log/warnf "%s failed: %s: %s"
+                    ~(str body) (.getName (.getClass e#)) (.getMessage e#))
          -1)))
 
 (defn- writer [{:keys [bufman select]} socket]
@@ -163,7 +163,8 @@
      (au/readable? coll-or-ch) (async/pipe coll-or-ch
                                            (async/map> #(vector :return out %)
                                                        bufman)
-                                           false)))
+                                           false))
+    nil)
 
   (return-buffer [this out buf] (bufman/return bufman out buf) nil)
   (copy-buffer [this out buf] (bufman/copy bufman out buf) nil))
