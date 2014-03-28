@@ -3,6 +3,7 @@
   (:require [clojure.core.async :as async :refer [>! <! >!! <!! go go-loop]]
             [clojure.core.async.impl.protocols :as async-protos]
             [clojure.tools.macro :refer [name-with-attributes]]
+            [http-dedup.async-utils :as au]
             [taoensso.timbre :as log]))
 
 (defprotocol Actor
@@ -59,7 +60,7 @@
                           (catch Throwable t
                             (log/error t "error handling message" {:msg msg :actor actor :state state})
                             {}))
-              result (if (satisfies? async-protos/ReadPort result)
+              result (if (au/readable? result)
                        (<! result)
                        result)]
           (recur (if (map? result)
