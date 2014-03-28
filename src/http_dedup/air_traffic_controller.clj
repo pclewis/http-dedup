@@ -92,11 +92,10 @@
     [new-req (into [(str-to-bytebuf new-req)] bufs)]))
 
 (defn- read-request
-  "Read ByteBuffers from a channel until two newlines in a row occur.
-   Returns a channel which will receive the request as string and a
-   vector of ByteBuffers that were pulled from the read-channel.
-   If timeout-ms passes without reading from the socket, or the
-   read-channel is closed, the request will be nil."
+  "Read ByteBuffers from a channel until two newlines in a row occur. Returns a
+   channel which will receive the request as string and a vector of ByteBuffers
+   that were pulled from the read-channel.  If timeout-ms passes without reading
+   from the socket, or the read-channel is closed, the request will be nil."
   [read-channel timeout-ms]
   (go-loop [request-so-far nil
             bufs []]
