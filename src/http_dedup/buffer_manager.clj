@@ -68,7 +68,9 @@
          (log/debug "return: buffer doesn't belong to us, discarding"))))))
 
 (defn buffer-manager [max-buffers buffer-size]
-  (let [actor (BufferManagerActor. (async/chan))]
-    (run-actor actor (Bufman. (repeatedly max-buffers #(ByteBuffer/allocate buffer-size))
-                              [] {} {} {}))
+  (let [actor (BufferManagerActor. (async/chan 1024))]
+    (run-actor actor
+               (Bufman. (repeatedly max-buffers
+                                    #(ByteBuffer/allocateDirect buffer-size))
+                        [] {} {} {}))
     actor))
