@@ -1,7 +1,7 @@
 (ns http-dedup.buffer-manager-test
   (:require [clojure.test :refer :all]
             [http-dedup.buffer-manager :refer :all]
-            [http-dedup.async-utils :refer :all]
+            [http-dedup.async-utils :refer [peek!! get!!]]
             [clojure.core.async :as async :refer [>! >!! <! <!!]])
   (:import [java.nio ByteBuffer]))
 
