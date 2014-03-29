@@ -30,7 +30,7 @@
   (copy [this out buf]
     (let [src (parent parent-map buf)
           src-id (buf-id src)
-          dst (.asReadOnlyBuffer buf)
+          dst (.asReadOnlyBuffer ^ByteBuffer buf)
           dst-id (buf-id dst)
           refs (ref-map src-id)]
       (when-not refs (log/warn "copy: request to copy a buffer with no outstanding refs!"
@@ -43,7 +43,7 @@
         (log/warn "copy: requester went away, discarding copy"))) )
 
   (return [this out buf]
-    (let [src (parent parent-map buf)
+    (let [^ByteBuffer src (parent parent-map buf)
           src-id (buf-id src)
           id (buf-id buf)]
       (log/trace "return:" id "(clone of" src-id ")" )

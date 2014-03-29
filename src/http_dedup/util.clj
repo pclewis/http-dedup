@@ -1,7 +1,8 @@
 (ns http-dedup.util
-  (:import [java.nio.charset Charset CharsetDecoder]))
+  (:import [java.nio.charset Charset CharsetDecoder]
+           [java.nio ByteBuffer]))
 
-(def ASCII (Charset/forName "US-ASCII"))
+(def ^Charset ASCII (Charset/forName "US-ASCII"))
 
 (defn test-bits
   "Returns true if all bits in y are set in x."
@@ -20,15 +21,17 @@
       old-value
       (recur @atom))))
 
-(defn bytebuf-to-str [bb] (.toString (.decode ASCII (.duplicate bb))))
+(defn bytebuf-to-str [^ByteBuffer bb]
+  (.toString (.decode ASCII (.duplicate bb))))
 
-(defn str-to-bytebuf [s] (.encode ASCII s))
+(defn str-to-bytebuf [^String s]
+  (.encode ASCII s))
 
 (defn drop-bytes!
   "Modify a sequence of buffers so that the first n bytes are removed.
    If n is bigger than the first buffer, it will have .remaining=0, and so on."
   [n bufs]
-  (when-let [[buf & rest] (seq bufs)]
+  (when-let [[^ByteBuffer buf & rest] (seq bufs)]
     (let [size (.remaining buf)]
       (if (> n size)
         (do (.position buf (.limit buf))

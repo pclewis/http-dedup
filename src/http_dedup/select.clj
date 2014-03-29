@@ -1,5 +1,5 @@
 (ns http-dedup.select
-  (:import [java.nio.channels Selector SelectionKey])
+  (:import [java.nio.channels Selector SelectionKey SelectableChannel])
   (:require [clojure.core.async :as async :refer [go go-loop >! <! >!! <!!]]
             [http-dedup.async-utils :refer [thread get!!]]
             [http-dedup.util :refer [bit-seq pre-swap!]]
@@ -14,12 +14,13 @@
     SelectionKey/OP_CONNECT :connect
     0 :close))
 
-(defn- dispatch-events [selector]
+(defn- dispatch-events [^Selector selector]
   (let [keys (.selectedKeys selector)]
     (log/trace "Selected some keys" keys)
-    (doseq [key keys :let [ops (.readyOps key)
-                           opseq (bit-seq ops)
-                           receivers (.attachment key)]]
+    (doseq [^SelectionKey key keys
+            :let [ops (.readyOps key)
+                  opseq (bit-seq ops)
+                  receivers (.attachment key)]]
       (.interestOps key (bit-and-not (.interestOps key) ops))
       (.attach key (apply dissoc (.attachment key) opseq))
       (doseq [op opseq
@@ -28,18 +29,19 @@
         (go (>! r key))))
     (.clear keys)))
 
-(defn- debug-state [selector]
+(defn- debug-state [^Selector selector]
   (log/debug
-   (map (fn [k] (str (.channel k) "->"
-                    (clojure.string/join
-                     "," (map #(str (op-to-kw (key %)) "->" (val %))
-                              (.attachment k)))))
+   (map (fn [^SelectionKey k]
+          (str (.channel k) "->"
+               (clojure.string/join
+                "," (map #(str (op-to-kw (key %)) "->" (val %))
+                         (.attachment k)))))
         (.keys selector))))
 
-(defn- handle-message [selector [op ch rch]]
+(defn- handle-message [^Selector selector [op ^SelectableChannel ch rch]]
   (if (= op :debug-state)
     (debug-state selector)
-    (let [sk (.keyFor ch selector)]
+    (let [^SelectionKey sk (.keyFor ch selector)]
       (log/trace "selector: got message: " [(op-to-kw op) ch rch])
       (if-not (.isOpen ch)
         (do (log/trace "request on closed channel" ch)
@@ -62,7 +64,7 @@
             (.register ch selector op {op [rch]})))))))
 
 (declare get-messages)
-(defn- selector-thread [selector mailbox]
+(defn- selector-thread [^Selector selector mailbox]
   (thread
    (loop []
      (when (< 0 (.select selector))
@@ -75,7 +77,7 @@
        (recur)))
 
    (log/info "Select thread exiting")
-   (doseq [k (.keys selector)]
+   (doseq [^SelectionKey k (.keys selector)]
      (.cancel k)
      (.close (.channel k)))))
 
@@ -93,7 +95,7 @@
 (defn- sub [select op socket out]
   (let [c (count (swap! (:mailbox select) conj [op socket out]))]
     (when (= 1 c)
-      (.wakeup (:selector select)))))
+      (.wakeup ^Selector (:selector select)))))
 
 (defmacro subfns [& ops]
   (cons 'do

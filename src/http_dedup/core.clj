@@ -7,7 +7,7 @@
              [air-traffic-controller :as atc]]))
 
 (defmethod clojure.core/print-method Throwable [t ^java.io.Writer writer]
-  (.write writer (log/stacktrace t "\n" {})))
+  (.write writer ^String (log/stacktrace t "\n" {})))
 
 (def cli-options
   [["-l" "--listen [HOST:]PORT"

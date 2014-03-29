@@ -1,6 +1,7 @@
 (ns http-dedup.socket-manager
   (:import [java.nio.channels SocketChannel ServerSocketChannel]
-           [java.net InetAddress InetSocketAddress])
+           [java.net InetAddress InetSocketAddress]
+           [java.nio ByteBuffer])
   (:require [http-dedup
              [async-utils :as au]
              [select :as select]
@@ -50,15 +51,16 @@
   `(try ~@body
        (catch java.io.IOException e#
          (log/warnf "%s failed: %s: %s"
-                    ~(str body) (.getName (.getClass e#)) (.getMessage e#))
+                    ~(str body) (.getName (.getClass ^Object e#))
+                    (.getMessage ^Exception e#))
          -1)))
 
-(defn- writer [{:keys [bufman select]} socket]
+(defn- writer [{:keys [bufman select]} ^SocketChannel socket]
   (let [inch (async/chan 64)]
     (go
      (try
        (loop []
-         (when-let [buf (<! inch)]
+         (when-let [buf ^ByteBuffer (<! inch)]
            (log/trace socket "received a buffer to write" buf)
            (while (.hasRemaining buf)
              (when-not (and (<! (select/write select socket))
@@ -72,13 +74,13 @@
          (select/close select socket))))
     inch))
 
-(defn- reader [{:keys [bufman select]} socket wch]
+(defn- reader [{:keys [bufman select]} ^SocketChannel socket wch]
   (let [outch (async/chan 64)]
     (go
      (try
        (loop []
          (if (<! (select/read select socket))
-           (let [buf (<! (bufman/request bufman))
+           (let [buf ^ByteBuffer (<! (bufman/request bufman))
                  n-read (safe-io (.read socket buf))]
              (log/trace "Received" n-read "bytes on socket" buf)
              (if (> 0 n-read)
@@ -105,7 +107,7 @@
           (select/close select socket)
           false))))
 
-(defn- connector [{:keys [select] :as this} socket outch]
+(defn- connector [{:keys [select] :as this} ^SocketChannel socket outch]
   (go
    (try
      (loop []
@@ -118,14 +120,14 @@
      (finally
        (async/close! outch)))))
 
-(defn- acceptor [{:keys [select] :as this} socket outch]
+(defn- acceptor [{:keys [select] :as this} ^ServerSocketChannel socket outch]
   (go
    (try
      (loop []
        (when (<! (select/accept select socket))
          (let [new-sock (safe-io (.accept socket))]
            (when-not (= -1 new-sock)
-             (.configureBlocking new-sock false)
+             (.configureBlocking ^SocketChannel new-sock false)
              (if (send-channels this outch new-sock)
                (recur)
                (log/error "acceptor: channel closed, no longer accepting"
@@ -140,7 +142,8 @@
     [this out host port]
     (let [socket (doto (SocketChannel/open) (.configureBlocking false))]
       (try
-        (.connect socket (InetSocketAddress. (InetAddress/getByName host) port))
+        (.connect socket (InetSocketAddress. (InetAddress/getByName host)
+                                             ^long port))
         (connector this socket out)
         (catch java.net.ConnectException e
           (log/errorf "connect: connect to %s:%d failed: %s"
@@ -152,7 +155,7 @@
     [this out host port]
     (let [socket (doto (ServerSocketChannel/open) (.configureBlocking false))]
       (.bind (.socket socket)
-             (InetSocketAddress. (InetAddress/getByName host) port))
+             (InetSocketAddress. (InetAddress/getByName host) ^long port))
       (acceptor this socket out))
     nil) ; don't accidentally return channel
 
