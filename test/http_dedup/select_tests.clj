@@ -1,8 +1,8 @@
 (ns http-dedup.select-tests
   (:require [clojure.test :refer :all]
             [http-dedup.select :as select]
-            [http-dedup.async-utils :refer :all]
-            [clojure.core.async :as async :refer [>! >!! <! <!!]])
+            [http-dedup.async-utils :refer [get!!]]
+            [clojure.core.async :as async])
   (:import [java.nio.channels SocketChannel ServerSocketChannel]
            [java.net InetSocketAddress InetAddress]))
 
