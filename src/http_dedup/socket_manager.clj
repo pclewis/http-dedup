@@ -1,8 +1,7 @@
 (ns http-dedup.socket-manager
   (:import [java.nio.channels SocketChannel ServerSocketChannel]
            [java.net InetAddress InetSocketAddress]
-           [java.nio ByteBuffer]
-           [http_dedup.buffer_manager ArcByteBuffer]) ;; WAT: - not translated
+           [java.nio ByteBuffer])
 
   (:require [http-dedup
              [async-utils :as au]
@@ -56,16 +55,15 @@
        (loop []
          (when-let [msg (<! inch)]
            (log/trace socket "received a buffer to write" msg)
-           (let [buf (if (instance? ByteBuffer msg) msg @msg)]
+           (let [buf ^ByteBuffer (bufman/unwrap msg)]
              (while (.hasRemaining buf)
-               (log/trace "write...")
+               (log/trace "write..." buf)
                (when-not (and (<! (select/write select socket))
                               (< 0 (safe-io (.write socket buf))))
                  (log/debug "write: socket is closed, discarding buffer:" socket)
                  (.limit buf 0))))
            (log/trace "write: finished")
-           (when-not (instance? ByteBuffer msg)
-             (.release! msg))
+           (bufman/release! msg)
            (recur)))
        (finally
          (log/debug "write: closing connection" socket)
@@ -78,14 +76,14 @@
      (try
        (loop []
          (if (<! (select/read select socket))
-           (let [buf (<! (.request bufman))
-                 n-read (safe-io (.read socket @buf))]
+           (let [buf (<! (bufman/request bufman))
+                 n-read (safe-io (.read socket ^ByteBuffer @buf))]
              (log/trace "Received" n-read "bytes on socket" buf)
              (if (> 0 n-read)
-               (.release! buf)
-               (do (.flip @buf)
+               (bufman/release! buf)
+               (do (.flip ^ByteBuffer @buf)
                    (or (>! outch buf)
-                       (.release! buf))
+                       (bufman/release! buf))
                    (recur))))))
        (finally
          (log/debug "read: connection closed")
@@ -160,11 +158,8 @@
   (release-buffers
     [this out coll-or-ch]
     (cond
-     (coll? coll-or-ch) (doall (map #(when (instance? ArcByteBuffer %)
-                                       (.release! %)) coll-or-ch))
-     (au/readable? coll-or-ch) (au/drain coll-or-ch
-                                         #(when (instance? ArcByteBuffer %)
-                                            (.release! %))))
+     (coll? coll-or-ch) (doall (map bufman/release! coll-or-ch))
+     (au/readable? coll-or-ch) (au/drain coll-or-ch bufman/release!))
     nil))
 
 (defn socket-manager [select bufman]

@@ -1,6 +1,6 @@
 (ns http-dedup.buffer-manager-test
   (:require [clojure.test :as test :refer [deftest is use-fixtures]]
-            [http-dedup.buffer-manager :refer :all]
+            [http-dedup.buffer-manager :as bufman]
             [http-dedup.async-utils :refer [get!!]]
             [clojure.core.async :as async])
   (:import [java.nio ByteBuffer]))
@@ -12,7 +12,7 @@
 (declare ^:dynamic *bufman*)
 
 (defn buffer-manager-fixture [f]
-  (binding [*bufman* (buffer-manager 2 16)]
+  (binding [*bufman* (bufman/buffer-manager 2 16)]
     (f)
     (assert (= 2 (count @(.pool *bufman*))) "Buffers not released properly")
     (assert (empty? @(.waiting *bufman*)))) "Outstanding requests")
@@ -20,29 +20,29 @@
 (use-fixtures :each buffer-manager-fixture)
 
 (defn safe-request [bufman]
-  (let [buf (get!! (.request *bufman*))]
-    (assert (not (false? buf)))
+  (let [buf (get!! (bufman/request *bufman*))]
+    (assert buf)
     buf))
 
 (deftest acquire-buffer
-  (let [b1 (get!! (.request *bufman*))]
+  (let [b1 (safe-request *bufman*)]
     (is (instance? ByteBuffer @b1))
     (.release! b1)))
 
 (deftest wait-for-buffer
-  (let [b1 (get!! (.request *bufman*))
-        b2 (get!! (.request *bufman*))
-        b3c (.request *bufman*)]
+  (let [b1 (safe-request *bufman*)
+        b2 (safe-request *bufman*)
+        b3c (bufman/request *bufman*)]
     (is (false? (get!! b3c false 100)))
-    (.release! b1)
+    (bufman/release! b1)
     (let [b3 (get!! b3c)]
       (is (not (false? b3)))
-      (.release! b3))
-    (.release! b2)))
+      (bufman/release! b3))
+    (bufman/release! b2)))
 
 (deftest copy-buffer
   (let [[b1 b2] (repeatedly #(safe-request *bufman*))
-        b1-1 (.copy! b1)]
+        b1-1 (bufman/copy! b1)]
     (is (not (false? b2)))
     (is (not (identical? @b1 @b1-1)))
     (.put @b1 (.getBytes "test"))

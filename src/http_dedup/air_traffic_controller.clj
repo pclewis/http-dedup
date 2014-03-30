@@ -41,9 +41,9 @@
       (when-let [buffer (<! read-channel)]
         (try
           (doseq [ch write-channels
-                  :let [copy (.copy! buffer)]]
-            (or (>! ch copy) (.release! copy)))
-          (finally (.release! buffer)))
+                  :let [copy (bufman/copy! buffer)]]
+            (or (>! ch copy) (bufman/release! copy)))
+          (finally (bufman/release! buffer)))
         (recur)))))
 
 (defn- log-request [request start first-block-time n-passengers]

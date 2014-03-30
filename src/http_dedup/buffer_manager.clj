@@ -6,40 +6,49 @@
             [clojure.core.async :as async :refer [chan put!]]
             [taoensso.timbre :as log]))
 
-(definterface IArcByteBuffer
-  (copy_BANG_ [])
-  (^void release_BANG_ []))
+(defprotocol IArcByteBuffer
+  (unwrap [this])
+  (copy! [this])
+  (release! [this]))
 
-(definterface IBufferManager
-  (request [])
-  (request [out])
-  (^void return [^java.nio.ByteBuffer buffer]))
+(defprotocol IBufferManager
+  (request [this] [this out])
+  (return [this buffer]))
 
-(deftype ArcByteBuffer [^IArcByteBuffer parent
+;; For convenience, allow ByteBuffers to be treated as ArcByteBuffers
+(extend-type ByteBuffer
+  IArcByteBuffer
+  (unwrap [this] this)
+  (copy! [this] (.asReadOnlyBuffer this))
+  (release! [this] nil))
+
+(deftype ArcByteBuffer [parent
                         ^ByteBuffer byte-buffer
-                        ^IBufferManager manager
+                        manager
                         n-refs]
   clojure.lang.IDeref
   (deref [this] byte-buffer)
 
   IArcByteBuffer
+  (unwrap [this] byte-buffer)
+
   (copy! [this]
     (if parent
-      (.copy! parent)
+      (copy! parent)
       (do (swap! n-refs inc)
           (ArcByteBuffer. this (.asReadOnlyBuffer byte-buffer) nil nil))))
 
   (release! [_]
     (if parent
-      (.release! parent)
+      (release! parent)
       (when (zero? (swap! n-refs dec))
         (.clear byte-buffer)
-        (.return manager byte-buffer)))))
+        (return manager byte-buffer)))))
 
 (deftype BufferManager [pool waiting]
   IBufferManager
   (request [this]
-    (.request this (chan)))
+    (request this (chan)))
   (request [this out]
     (if-let [buf (dequeue! pool)]
       (when-not (put! out (ArcByteBuffer. nil buf this (atom 1)))
