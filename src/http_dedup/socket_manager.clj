@@ -1,7 +1,9 @@
 (ns http-dedup.socket-manager
   (:import [java.nio.channels SocketChannel ServerSocketChannel]
            [java.net InetAddress InetSocketAddress]
-           [java.nio ByteBuffer])
+           [java.nio ByteBuffer]
+           [http_dedup.buffer_manager ArcByteBuffer]) ;; WAT: - not translated
+
   (:require [http-dedup
              [async-utils :as au]
              [select :as select]
@@ -15,13 +17,14 @@
 (defactor SocketManager
   "core.async friendly methods for interacting with selector.
 
-   The read-channel will receive a ByteBuffer every time data arrives on the
-   socket, and close when the connection closes. The ByteBuffer must be returned
-   by writing it to another socket or calling return-buffer.
+   The read-channel will receive a wrapped ByteBuffer every time data arrives on
+   the socket, and close when the connection closes. Use deref/@ to access the
+   warapped ByteBuffer. The ByteBuffer must be returned by writing it to another
+   socket or calling it's .release! method.
 
    ByteBuffers sent to the write-channel will be written to the socket and
-   automatically reclaimed.  The connection will be closed when the
-   write-channel is closed, after all writes are finished."
+   released when complete. The connection will be closed when the write-channel
+   is closed, after all writes are finished."
 
   (connect
    "Connect to a given host/port. Emits Connection when finished, or closes on
@@ -32,18 +35,9 @@
    "Bind to given host/port and emit accepted Connections."
    [host port])
 
-  (copy-buffer
-   [buf]
-   "Create a copy of a buffer. Buffers will not be reused until all copies have
-    been returned." )
-
-  (return-buffer
-   [buf]
-   "Return a buffer without writing it to a socket.")
-
-  (return-buffers
+  (release-buffers
    [coll-or-ch]
-   "Return all buffers from a collection or channel."))
+   "Release all buffers from a collection or channel."))
 
 (defmacro safe-io
   "Log and return -1 if body throws an IOException."
@@ -60,14 +54,18 @@
     (go
      (try
        (loop []
-         (when-let [buf ^ByteBuffer (<! inch)]
-           (log/trace socket "received a buffer to write" buf)
-           (while (.hasRemaining buf)
-             (when-not (and (<! (select/write select socket))
-                            (< 0 (safe-io (.write socket buf))))
-               (log/debug "write: socket is closed, discarding buffer:" socket)
-               (.limit buf 0)))
-           (bufman/return bufman buf)
+         (when-let [msg (<! inch)]
+           (log/trace socket "received a buffer to write" msg)
+           (let [buf (if (instance? ByteBuffer msg) msg @msg)]
+             (while (.hasRemaining buf)
+               (log/trace "write...")
+               (when-not (and (<! (select/write select socket))
+                              (< 0 (safe-io (.write socket buf))))
+                 (log/debug "write: socket is closed, discarding buffer:" socket)
+                 (.limit buf 0))))
+           (log/trace "write: finished")
+           (when-not (instance? ByteBuffer msg)
+             (.release! msg))
            (recur)))
        (finally
          (log/debug "write: closing connection" socket)
@@ -80,14 +78,14 @@
      (try
        (loop []
          (if (<! (select/read select socket))
-           (let [buf ^ByteBuffer (<! (bufman/request bufman))
-                 n-read (safe-io (.read socket buf))]
+           (let [buf (<! (.request bufman))
+                 n-read (safe-io (.read socket @buf))]
              (log/trace "Received" n-read "bytes on socket" buf)
              (if (> 0 n-read)
-               (bufman/return bufman buf)
-               (do (.flip buf)
+               (.release! buf)
+               (do (.flip @buf)
                    (or (>! outch buf)
-                       (bufman/return bufman buf))
+                       (.release! buf))
                    (recur))))))
        (finally
          (log/debug "read: connection closed")
@@ -159,18 +157,15 @@
       (acceptor this socket out))
     nil) ; don't accidentally return channel
 
-  (return-buffers
+  (release-buffers
     [this out coll-or-ch]
     (cond
-     (coll? coll-or-ch) (doall (map #(bufman/return bufman out %) coll-or-ch))
-     (au/readable? coll-or-ch) (async/pipe coll-or-ch
-                                           (async/map> #(vector :return out %)
-                                                       bufman)
-                                           false))
-    nil)
-
-  (return-buffer [this out buf] (bufman/return bufman out buf) nil)
-  (copy-buffer [this out buf] (bufman/copy bufman out buf) nil))
+     (coll? coll-or-ch) (doall (map #(when (instance? ArcByteBuffer %)
+                                       (.release! %)) coll-or-ch))
+     (au/readable? coll-or-ch) (au/drain coll-or-ch
+                                         #(when (instance? ArcByteBuffer %)
+                                            (.release! %))))
+    nil))
 
 (defn socket-manager [select bufman]
   (let [actor (SocketManagerActor. (async/chan))]

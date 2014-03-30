@@ -40,14 +40,10 @@
     (loop []
       (when-let [buffer (<! read-channel)]
         (try
-          ;; can't copy directly onto channel because we need to make sure the
-          ;; copy is done before we fall out and close channel. also we want
-          ;; to park here when a client is slow, instead of buffering data via
-          ;; put! until we hit the limit and crash
           (doseq [ch write-channels
-                  :let [copy (<! (sockman/copy-buffer sockman buffer))]]
-            (or (>! ch copy) (sockman/return-buffer sockman copy)))
-          (finally (sockman/return-buffer sockman buffer)))
+                  :let [copy (.copy! buffer)]]
+            (or (>! ch copy) (.release! copy)))
+          (finally (.release! buffer)))
         (recur)))))
 
 (defn- log-request [request start first-block-time n-passengers]
@@ -76,7 +72,7 @@
                 (log-request request start first-block-time (count passengers))
                 (finally
                   (doall (map async/close! passengers))))))
-        (do (sockman/return-buffers sockman pilot-read)
+        (do (sockman/release-buffers sockman pilot-read)
             (doall (map async/close! (<! (depart atc request))))
             (log/warn "connection failed, flight canceled"))))))
 
@@ -85,7 +81,7 @@
    appropriately. Necessary because the buffers may have already started reading
    the body of the request, which we need to preserve."
   [req bufs]
-  (drop-bytes! (count req) bufs)
+  (drop-bytes! (count req) (map deref bufs))
   (let [new-req (clojure.string/replace-first req
                                               #"(?m)^Connection: (.*)$"
                                               "Connection: close")]
@@ -103,7 +99,7 @@
                        (async/timeout timeout-ms) :timeout)]
       (if-not (= :timeout buf)
         (let [bs (conj bufs buf)
-              s (str request-so-far (bytebuf-to-str buf))
+              s (str request-so-far (bytebuf-to-str @buf))
               i (.indexOf s "\r\n\r\n")]
           (if (>= i 0)
             [(subs s 0 i) bs]
@@ -121,7 +117,7 @@
               read-channel (au/concat (async/to-chan bufs) (:read connection))]
           (when (<! (board atc request (:write connection)))
             (start-flight atc sockman request read-channel host port)))
-        (sockman/return-buffers sockman bufs)))))
+        (sockman/release-buffers sockman bufs)))))
 
 (defn run-server [config]
   (let [bufman (bufman/buffer-manager (:max-buffers config)

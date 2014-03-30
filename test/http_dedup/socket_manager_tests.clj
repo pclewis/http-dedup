@@ -26,4 +26,4 @@
         server (<!! incoming-ch)
         client (<!! outgoing-ch)]
     (>!! (:write server) (str-to-bytebuf "Hello world"))
-    (is (= "Hello world" (bytebuf-to-str (<!! (:read client)))))))
+    (is (= "Hello world" (bytebuf-to-str @(<!! (:read client)))))))

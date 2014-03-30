@@ -37,3 +37,15 @@
         (do (.position buf (.limit buf))
             (recur (- n size) rest))
         (.position buf (+ (.position buf) n))))))
+
+;; from https://stackoverflow.com/questions/8938330/clojure-swap-atom-dequeuing
+;; modified to be safe on lists
+(defn dequeue!
+  [queue]
+  (loop []
+    (let [q     @queue
+          value (peek q)
+          nq    (if (empty? q) q (pop q))]
+      (if (compare-and-set! queue q nq)
+        value
+        (recur)))))
